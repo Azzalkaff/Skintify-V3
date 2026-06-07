@@ -196,5 +196,5 @@ def show_page():
             ui.notify(message, color='negative')
 
     # Layout Utama Halaman
-    with ui.column().classes('w-full min-h-screen flex-col items-center justify-start relative bg-[#F9F5F6] py-8 px-4 overflow-y-auto'):
+    with ui.column().classes('w-full min-h-screen flex-col items-center justify-start relative bg-transparent py-8 px-4 overflow-y-auto'):
         form_kontainer()
