@@ -179,6 +179,11 @@ def create_spa_router():
 
 create_spa_router()
 
+# 6. Registrasi Raw FastAPI Routes (OAuth)
+from app.auth.auth import login_google_route, auth_google_callback_route
+app.add_api_route('/login/google', login_google_route, methods=['GET'])
+app.add_api_route('/auth/google/callback', auth_google_callback_route, methods=['GET'])
+
 
 # 7. Jalankan Aplikasi
 if __name__ in {"__main__", "__mp_main__"}:

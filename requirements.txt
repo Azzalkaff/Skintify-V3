@@ -21,6 +21,8 @@ rapidfuzz
 pydantic
 questionary
 rich
+authlib
+httpx
 
 # --- YouTube Scraper (opsional, jalankan manual) ---
 # yt-dlp dan faster-whisper tidak otomatis di-install karena berat
