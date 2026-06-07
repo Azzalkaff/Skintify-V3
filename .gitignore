@@ -18,3 +18,5 @@ Hasil_shopee_claude/
 build/
 dist/
 *.spec
+# Exclude internal dev docs
+markdown/
