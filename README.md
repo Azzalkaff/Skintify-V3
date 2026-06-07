@@ -22,13 +22,27 @@ Pastikan komputer Anda sudah terinstal **Python 3.9** atau versi yang lebih baru
    cd Skintify-V3
    ```
 
-2. **Install Library yang Dibutuhkan**
+2. **Buat Virtual Environment (Sangat Disarankan)**
+   Buat lingkungan virtual agar library tidak bentrok dengan Python di komputermu:
+   ```bash
+   python -m venv venv
+   ```
+   Lalu aktifkan (Windows):
+   ```bash
+   venv\Scripts\activate
+   ```
+   Atau aktifkan (Mac/Linux):
+   ```bash
+   source venv/bin/activate
+   ```
+
+3. **Install Library yang Dibutuhkan**
    Jalankan perintah ini di Terminal untuk mengunduh semua perlengkapan:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Nyalakan Mesin Aplikasi**
+4. **Nyalakan Mesin Aplikasi**
    Gunakan perintah ini untuk menghidupkan server lokal:
    ```bash
    python main.py
