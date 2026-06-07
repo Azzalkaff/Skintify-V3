@@ -6,8 +6,12 @@ import secrets
 class BasisData:
     """Manajer Database SQLite sederhana untuk pemula (Separation of Concerns)."""
     
-    # Path absolut untuk file database
-    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    # Path absolut untuk file database (Mendukung packaging PyInstaller .exe)
+    import sys
+    if getattr(sys, 'frozen', False):
+        BASE_DIR = os.path.dirname(sys.executable)
+    else:
+        BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     DB_FOLDER = os.path.join(BASE_DIR, "data", "db")
     DB_NAMA = os.path.join(DB_FOLDER, "data_skintify.db")
 
@@ -70,14 +74,37 @@ class BasisData:
             # Migrasi: Tambah kolom role jika belum ada
             if 'role' not in kolom:
                 kursor.execute("ALTER TABLE pengguna ADD COLUMN role TEXT DEFAULT 'user'")
-            # Kolom profil kulit (Tambahan Falisha)
-            for col, default in [
-                ('skin_type',         "''"),
-                ('avoid_ingredients', "''"),
-                ('skin_issues',       "''"),
-            ]:
-                if col not in kolom:
-                    kursor.execute(f"ALTER TABLE pengguna ADD COLUMN {col} TEXT DEFAULT {default}")
+            # Migrasi: Tambah kolom wishlist jika belum ada
+            if 'wishlist' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN wishlist TEXT DEFAULT '[]'")
+            
+            # Migrasi: Kolom untuk Onboarding Profile
+            if 'skin_type' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN skin_type TEXT")
+            if 'avoid_ingredients' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN avoid_ingredients TEXT DEFAULT '[]'")
+            if 'skin_issues' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN skin_issues TEXT DEFAULT '[]'")
+            if 'skincare_goals' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN skincare_goals TEXT DEFAULT '[]'")
+            if 'lifestyle' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN lifestyle TEXT DEFAULT '[]'")
+            if 'onboarding_completed' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN onboarding_completed INTEGER DEFAULT 0")
+            if 'has_seen_about' not in kolom:
+                kursor.execute("ALTER TABLE pengguna ADD COLUMN has_seen_about INTEGER DEFAULT 0")
+
+            # Membuat tabel relasional untuk wishlist (O(1) updates)
+            kursor.execute('''
+                CREATE TABLE IF NOT EXISTS pengguna_wishlist (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email TEXT NOT NULL,
+                    product_slug TEXT NOT NULL,
+                    product_data TEXT,
+                    UNIQUE(email, product_slug)
+                )
+            ''')
+            
             koneksi.commit()
 
     @staticmethod
@@ -140,42 +167,116 @@ class BasisData:
             return False
 
     @staticmethod
-    def ambil_pengguna_by_identifier(identifier: str) -> dict:
-        """Ambil data lengkap user termasuk profil kulit. Return dict atau {}."""
-        with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
-            koneksi.row_factory = sqlite3.Row
-            kursor = koneksi.cursor()
-            kursor.execute(
-                "SELECT * FROM pengguna WHERE email = ? OR username = ?",
-                (identifier, identifier)
-            )
-            hasil = kursor.fetchone()
-            if hasil:
-                d = dict(hasil)
-                # Normalkan list yang disimpan sebagai string CSV
-                for kolom in ("avoid_ingredients", "skin_issues"):
-                    val = d.get(kolom, "") or ""
-                    d[kolom] = [x.strip() for x in val.split(",") if x.strip()]
-                return d
-            return {}
-
-    @staticmethod
-    def simpan_profil_kulit(email: str, skin_type: str,
-                            avoid_ingredients: list, skin_issues: list,
-                            city: str = "Jakarta") -> bool:
-        """Simpan data kulit user ke DB. Dipanggil oleh onboarding_page setelah survey."""
+    def update_pengguna_wishlist(email: str, wishlist_json: str) -> bool:
+        """[DEPRECATED] Update wishlist data for the user in the database."""
         try:
             with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
                 kursor = koneksi.cursor()
-                kursor.execute(
-                    """UPDATE pengguna
-                       SET skin_type = ?, avoid_ingredients = ?, skin_issues = ?, city = ?
-                       WHERE email = ?""",
-                    (skin_type, ", ".join(avoid_ingredients), ", ".join(skin_issues), city, email)
-                )
+                kursor.execute('UPDATE pengguna SET wishlist = ? WHERE email = ?', (wishlist_json, email))
+                koneksi.commit()
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def tambah_ke_wishlist(email: str, product_slug: str, product_data_json: str) -> bool:
+        """Menambahkan satu item ke wishlist menggunakan tabel relasional O(1)."""
+        try:
+            with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
+                kursor = koneksi.cursor()
+                kursor.execute('''
+                    INSERT OR REPLACE INTO pengguna_wishlist (email, product_slug, product_data) 
+                    VALUES (?, ?, ?)
+                ''', (email, product_slug, product_data_json))
+                koneksi.commit()
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def hapus_dari_wishlist(email: str, product_slug: str) -> bool:
+        """Menghapus satu item dari wishlist O(1)."""
+        try:
+            with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
+                kursor = koneksi.cursor()
+                kursor.execute('DELETE FROM pengguna_wishlist WHERE email = ? AND product_slug = ?', (email, product_slug))
+                koneksi.commit()
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def ambil_wishlist(email: str) -> list:
+        """Mengambil semua wishlist pengguna secara instan."""
+        import json
+        try:
+            with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
+                kursor = koneksi.cursor()
+                kursor.execute('SELECT product_data FROM pengguna_wishlist WHERE email = ?', (email,))
+                rows = kursor.fetchall()
+                wishlist = []
+                for row in rows:
+                    if row[0]:
+                        try:
+                            wishlist.append(json.loads(row[0]))
+                        except: pass
+                return wishlist
+        except Exception:
+            return []
+
+    @staticmethod
+    def update_user_onboarding(email: str, skin_type: str, avoid_ingredients: str, skin_issues: str, skincare_goals: str, lifestyle: str) -> bool:
+        """Update data profil dari hasil onboarding ke database."""
+        try:
+            with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
+                kursor = koneksi.cursor()
+                kursor.execute('''
+                    UPDATE pengguna 
+                    SET skin_type = ?, avoid_ingredients = ?, skin_issues = ?, skincare_goals = ?, lifestyle = ?, onboarding_completed = 1
+                    WHERE email = ?
+                ''', (skin_type, avoid_ingredients, skin_issues, skincare_goals, lifestyle, email))
                 koneksi.commit()
             return True
         except Exception as e:
-            print(f"[DB] Gagal simpan profil kulit: {e}")
+            print(f"Error update_user_onboarding: {e}")
             return False
 
+    @staticmethod
+    def update_profil(email: str, city: str, skin_type: str, avoid_ingredients: list, skin_issues: list, skincare_goals: list, lifestyle: list):
+        """Menyimpan data profil dan hasil onboarding."""
+        import json
+        with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
+            kursor = koneksi.cursor()
+            kursor.execute('''
+                UPDATE pengguna 
+                SET city = ?, 
+                    skin_type = ?,
+                    avoid_ingredients = ?,
+                    skin_issues = ?,
+                    skincare_goals = ?,
+                    lifestyle = ?,
+                    onboarding_completed = 1
+                WHERE email = ?
+            ''', (
+                city, 
+                skin_type,
+                json.dumps(avoid_ingredients),
+                json.dumps(skin_issues),
+                json.dumps(skincare_goals),
+                json.dumps(lifestyle),
+                email
+            ))
+            koneksi.commit()
+            
+    @staticmethod
+    def set_has_seen_about(email: str):
+        """Menandai bahwa pengguna telah melihat About Card."""
+        try:
+            with sqlite3.connect(BasisData.DB_NAMA) as koneksi:
+                kursor = koneksi.cursor()
+                kursor.execute("UPDATE pengguna SET has_seen_about = 1 WHERE email = ?", (email,))
+                koneksi.commit()
+                return True
+        except Exception as e:
+            print(f"Error set_has_seen_about: {e}")
+            return False

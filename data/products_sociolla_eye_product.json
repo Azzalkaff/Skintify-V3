@@ -1,7 +1,7 @@
 {
   "metadata": {
     "source": "Sociolla",
-    "scraped_at": "2026-05-18T14:13:08.559119",
+    "scraped_at": "2026-05-18T15:27:53.776479",
     "total": 73,
     "category": "Eye Product",
     "endpoint": "https://catalog-api.sociolla.com/v3/search"
@@ -379,8 +379,8 @@
       "min_price_after_discount": 89000,
       "max_price_after_discount": 89000,
       "average_rating": 4.52,
-      "total_reviews": 999,
-      "total_recommended": 925,
+      "total_reviews": 1000,
+      "total_recommended": 926,
       "repurchase_yes": 0,
       "repurchase_no": 0,
       "repurchase_maybe": 0,
@@ -477,8 +477,8 @@
       "min_price_after_discount": 96850,
       "max_price_after_discount": 96850,
       "average_rating": 4.93,
-      "total_reviews": 895,
-      "total_recommended": 886,
+      "total_reviews": 896,
+      "total_recommended": 887,
       "repurchase_yes": 0,
       "repurchase_no": 0,
       "repurchase_maybe": 0,

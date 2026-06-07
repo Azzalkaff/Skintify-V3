@@ -1,3 +1,18 @@
+"""
+========================================================================
+KAMUS MINI: FILE CONTEXT (JANGAN PERNAH DIHAPUS!!! 🛑)
+1. Apa fungsi "context.py"? 
+   Ini adalah 'Otak Ingatan' sementara aplikasi Skintify. 
+   Setiap kali pengguna login, menyimpan produk ke wishlist, atau mencari barang,
+   ingatan mereka disimpannya di sini agar tidak hilang saat pindah halaman.
+2. Apa itu "SessionStateWrapper"? 
+   Ini adalah 'Sekat Ruangan'. Kalau ada 10 orang buka web Skintify secara bersamaan, 
+   fungsi ini memastikan keranjang belanja orang A tidak tertukar dengan orang B.
+3. KENAPA JANGAN DIHAPUS?
+   Kalau file ini dihapus, seluruh aplikasi akan hancur lebur malam ini juga,
+   karena semua halaman meminjam "otak ingatan" dari file ini!
+========================================================================
+"""
 import threading
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
@@ -67,6 +82,13 @@ class SessionStateWrapper:
             
         try:
             nicegui_app.storage.user[name] = value
+            # Auto-save wishlist to the database if authenticated
+            if name == 'wishlist' and nicegui_app.storage.user.get('authenticated'):
+                email = nicegui_app.storage.user.get('email')
+                if email:
+                    import json
+                    from app.database.database_manager import BasisData
+                    BasisData.update_pengguna_wishlist(email, json.dumps(value))
         except (RuntimeError, AttributeError):
             fallback = self._get_fallback_dict()
             fallback[name] = value

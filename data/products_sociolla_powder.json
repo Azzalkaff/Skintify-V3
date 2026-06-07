@@ -1,7 +1,7 @@
 {
   "metadata": {
     "source": "Sociolla",
-    "scraped_at": "2026-05-18T14:13:06.423731",
+    "scraped_at": "2026-05-18T15:27:50.496024",
     "total": 40,
     "category": "Powder",
     "endpoint": "https://catalog-api.sociolla.com/v3/search"
@@ -42,7 +42,7 @@
           "price": 159000,
           "price_after_discount": 143100,
           "discount_percentage": 10,
-          "stock": 319,
+          "stock": 318,
           "is_in_stock": true,
           "sold_quota": null,
           "total_quota": null,
@@ -724,7 +724,7 @@
           "discount_percentage": 55,
           "stock": 19,
           "is_in_stock": true,
-          "sold_quota": 2,
+          "sold_quota": 3,
           "total_quota": 10,
           "is_default": false
         },
@@ -736,7 +736,7 @@
           "discount_percentage": 55,
           "stock": 71,
           "is_in_stock": true,
-          "sold_quota": 2,
+          "sold_quota": 3,
           "total_quota": 10,
           "is_default": false
         }
@@ -917,7 +917,7 @@
           "price": 209000,
           "price_after_discount": 114950,
           "discount_percentage": 45,
-          "stock": 30,
+          "stock": 29,
           "is_in_stock": true,
           "sold_quota": 1,
           "total_quota": 50,
@@ -1154,8 +1154,8 @@
       "min_price_after_discount": 160200,
       "max_price_after_discount": 160200,
       "average_rating": 4.67,
-      "total_reviews": 222,
-      "total_recommended": 210,
+      "total_reviews": 223,
+      "total_recommended": 211,
       "repurchase_yes": 0,
       "repurchase_no": 0,
       "repurchase_maybe": 0,
@@ -1464,7 +1464,7 @@
           "price": 138000,
           "price_after_discount": 124200,
           "discount_percentage": 10,
-          "stock": 42,
+          "stock": 41,
           "is_in_stock": true,
           "sold_quota": null,
           "total_quota": null,

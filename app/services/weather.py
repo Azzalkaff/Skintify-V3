@@ -1,5 +1,6 @@
 import requests
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 
@@ -7,6 +8,40 @@ logger = logging.getLogger(__name__)
 
 class WeatherService:
     """Service untuk mendapatkan data cuaca real-time & prakiraan 10 hari menggunakan Open-Meteo."""
+
+    # ── In-memory cache dengan TTL 30 menit ──────────────────────────────────
+    # Key: nama kota (lowercase). Value: (timestamp, result_dict)
+    # Ini mencegah API call berulang setiap user pindah halaman.
+    # Cache bersifat process-wide (shared semua user) karena cuaca per-kota
+    # tidak berbeda antar user.
+    _cache: Dict[str, tuple] = {}
+    _CACHE_TTL_SECONDS: int = 30 * 60  # 30 menit
+
+    @classmethod
+    def _get_cached(cls, city_key: str):
+        """Ambil hasil cache jika masih valid. Return None jika kedaluwarsa."""
+        if city_key in cls._cache:
+            cached_at, result = cls._cache[city_key]
+            if (time.monotonic() - cached_at) < cls._CACHE_TTL_SECONDS:
+                logger.info(f"[WeatherCache] HIT untuk '{city_key}'")
+                return result
+            else:
+                del cls._cache[city_key]  # Buang cache kedaluwarsa
+        return None
+
+    @classmethod
+    def _set_cache(cls, city_key: str, result: dict):
+        """Simpan hasil ke cache."""
+        cls._cache[city_key] = (time.monotonic(), result)
+        logger.info(f"[WeatherCache] STORED untuk '{city_key}'")
+
+    @classmethod
+    def invalidate_cache(cls, city: str = None):
+        """Paksa hapus cache (misal setelah user ubah kota di profil)."""
+        if city:
+            cls._cache.pop(city.lower().strip(), None)
+        else:
+            cls._cache.clear()
     
     @staticmethod
     def _get_wmo_description(code: int) -> Dict[str, str]:
@@ -95,109 +130,9 @@ class WeatherService:
             
         return mock_forecast
 
-    @staticmethod
-    def fetch_weather(city: str) -> Dict[str, Any]:
+    @classmethod
+    def fetch_weather(cls, city: str) -> Dict[str, Any]:
         """
-        Mengambil cuaca real-time & forecast 10 hari menggunakan Open-Meteo API.
-        Jika terjadi kesalahan koneksi/limitasi, sistem otomatis beralih ke Fallback Mock.
+        Fitur cuaca dinonaktifkan untuk mengurangi beban aplikasi (bottleneck).
         """
-        if not city:
-            return {"status": "error", "msg": "City not provided"}
-
-        city_clean = city.strip()
-        
-        try:
-            # 1. Geocoding API: Ubah nama kota menjadi Latitude & Longitude
-            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_clean}&count=1&language=id&format=json"
-            geo_res = requests.get(geo_url, timeout=4)
-            
-            if geo_res.status_code != 200 or not geo_res.json().get("results"):
-                raise ValueError("Kota tidak ditemukan di Geocoding API")
-            
-            loc = geo_res.json()["results"][0]
-            lat, lon = loc["latitude"], loc["longitude"]
-            resolved_city = loc.get("name", city_clean)
-            
-            # 2. Forecast API: Ambil cuaca saat ini & 10 hari prakiraan
-            forecast_url = (
-                f"https://api.open-meteo.com/v1/forecast?"
-                f"latitude={lat}&longitude={lon}"
-                f"&current=temperature_2m,relative_humidity_2m,uv_index,weather_code"
-                f"&daily=temperature_2m_max,temperature_2m_min,uv_index_max,relative_humidity_2m_max,weather_code"
-                f"&timezone=auto&forecast_days=10"
-            )
-            
-            res = requests.get(forecast_url, timeout=4)
-            if res.status_code != 200:
-                raise ValueError("Gagal mengambil data dari Open-Meteo Forecast")
-                
-            data = res.json()
-            current = data.get("current", {})
-            daily = data.get("daily", {})
-            
-            # Map Current Weather
-            curr_code = current.get("weather_code", 0)
-            curr_mapped = WeatherService._get_wmo_description(curr_code)
-            
-            # Map 10-day Daily Forecast
-            days_id = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
-            months_id = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
-            
-            forecast_list = []
-            dates = daily.get("time", [])
-            temp_maxs = daily.get("temperature_2m_max", [])
-            temp_mins = daily.get("temperature_2m_min", [])
-            uv_maxs = daily.get("uv_index_max", [])
-            hum_maxs = daily.get("relative_humidity_2m_max", [])
-            wcodes = daily.get("weather_code", [])
-            
-            for i in range(len(dates)):
-                date_str = dates[i]
-                dt = datetime.strptime(date_str, "%Y-%m-%d")
-                day_name = days_id[dt.weekday()]
-                month_name = months_id[dt.month - 1]
-                date_label = f"{day_name}, {dt.day} {month_name}"
-                
-                day_mapped = WeatherService._get_wmo_description(wcodes[i] if i < len(wcodes) else 0)
-                
-                forecast_list.append({
-                    "date": date_str,
-                    "date_label": date_label,
-                    "temp_min": int(temp_mins[i]) if i < len(temp_mins) else 24,
-                    "temp_max": int(temp_maxs[i]) if i < len(temp_maxs) else 32,
-                    "humidity": int(hum_maxs[i]) if i < len(hum_maxs) else 70,
-                    "uv_index": int(uv_maxs[i]) if i < len(uv_maxs) else 4,
-                    "condition": day_mapped["desc"],
-                    "icon": day_mapped["icon"]
-                })
-                
-            return {
-                "status": "success",
-                "city": resolved_city,
-                "temp": int(current.get("temperature_2m", 28)),
-                "humidity": int(current.get("relative_humidity_2m", 60)),
-                "uv_index": int(current.get("uv_index", 4)),
-                "condition": curr_mapped["desc"],
-                "icon": curr_mapped["icon"],
-                "forecast": forecast_list
-            }
-            
-        except Exception as e:
-            logger.warning(f"Gagal memuat cuaca online untuk '{city}', beralih ke fallback: {e}")
-            
-            # Gunakan fallback mock jika offline atau gagal request
-            mock_forecast = WeatherService._generate_fallback_forecast(city_clean)
-            
-            # Map data cuaca saat ini dari hari pertama forecast fallback
-            today_weather = mock_forecast[0]
-            
-            return {
-                "status": "success",
-                "city": city_clean,
-                "temp": today_weather["temp_max"], # representasi suhu saat ini
-                "humidity": today_weather["humidity"],
-                "uv_index": today_weather["uv_index"],
-                "condition": today_weather["condition"],
-                "icon": today_weather["icon"],
-                "forecast": mock_forecast
-            }
+        return {"status": "disabled", "msg": "Fitur cuaca dinonaktifkan."}

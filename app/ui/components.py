@@ -10,10 +10,27 @@ class UIComponents:
 
     @staticmethod
     def safe_navigate(path: str) -> None:
-        """Navigasi halaman yang aman dengan visual loading feedback (Quasar Loading)."""
-        from nicegui import ui
+        """Navigasi SPA yang sangat cepat tanpa reload halaman penuh."""
+        from nicegui import ui, app
+        # Kembalikan body overflow ke auto secara paksa sebelum navigasi
         try:
-            # Pemicu loading spinner premium menggunakan Quasar API bawaan NiceGUI
+            ui.run_javascript("document.body.style.overflow = 'auto'; document.body.style.height = 'auto';")
+        except Exception:
+            pass
+            
+        is_standalone = path.startswith('http') or path in ['/login', '/onboarding']
+        try:
+            # Coba navigasi SPA tanpa reload browser
+            router_refresh = app.storage.client.get('spa_router_refresh')
+            if router_refresh and not is_standalone:
+                ui.run_javascript(f"window.history.pushState(null, '', '{path}');")
+                router_refresh(path)
+                return
+        except Exception:
+            pass
+            
+        # Fallback ke navigasi tradisional jika SPA tidak tersedia
+        try:
             ui.run_javascript("""
                 $q.loading.show({
                     message: 'Memuat Halaman... Silakan Tunggu',
@@ -29,56 +46,92 @@ class UIComponents:
 
     @staticmethod
     def toggle_sidebar(drawer: ui.left_drawer) -> None:
-        """Toggle status sidebar antara mini dan full (ikon saja)."""
-        from nicegui import app, ui
+        """Toggle status sidebar secara aman melalui sistem reaktivitas bawaan."""
+        from nicegui import app
         
-        # Ambil state saat ini, default ke False jika belum ada
         is_mini = app.storage.user.get('sidebar_mini', False)
         new_state = not is_mini
+        
+        # Update state persisten
         app.storage.user['sidebar_mini'] = new_state
         
-        # Quasar prop toggle: Gunakan cara yang paling kompatibel dengan NiceGUI/Quasar
+        # Gunakan fungsi props bawaan NiceGUI agar Vue.js tidak crash
         if new_state:
             drawer.props('mini')
         else:
             drawer.props(remove='mini')
-        
-        # Fallback JavaScript untuk memastikan Quasar merespon di Native mode
-        ui.run_javascript(f'getElement({drawer.id}).mini = {str(new_state).lower()}')
-        
-        # Paksa update (meskipun props() biasanya otomatis)
-        drawer.update()
 
     @staticmethod
-    def navbar(status_widget: Callable[[], None] = None) -> None:
+    def navbar(status_widget: Callable[[], None] = None, force: bool = False) -> None:
         """Merender bagian header navigasi atas. Membuka 'slot' untuk Widget Dinamis."""
+        from nicegui import app, ui
+        from app.context import state
+        
+        # SPA Mode: Jika dipanggil dari dalam halaman, jangan buat ulang header, cukup update slotnya
+        if getattr(state, 'spa_mode', False) and not force:
+            try:
+                ui.run_javascript("document.body.style.overflow = 'auto'; document.body.style.height = 'auto';")
+            except Exception:
+                pass
+            app.storage.client['status_widget'] = status_widget
+            if 'refresh_navbar_widget' in app.storage.client:
+                app.storage.client['refresh_navbar_widget']()
+            return
+            
         # Menerapkan panel kaca transparan di header
+        ui.query('body').style('overflow: auto; height: auto;')
         with ui.header().classes('flex items-center justify-between px-8 py-4 glass-panel z-50').style('background: rgba(255,255,255,0.4); border-bottom: 1px solid var(--glass-border);'):
-            # Logo resmi di atas kiri mentok (navbar) dengan ukuran uncollapsible
             with ui.row().classes('items-center'):
-                ui.image('/static/logo-skintify-fix.png').style('width: 45px; height: 45px;').classes('object-contain')
+                ui.label('Skintify').classes('text-2xl font-black text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-blue-500 tracking-tight')
             
             # Area Kanan: Taskbar Widget & Logout
             with ui.row().classes('items-center gap-6'):
-                if status_widget:
-                    status_widget() # Render Widget Kesehatan Rutinitas di sini
-                ui.button(
-                    'Logout',
-                    on_click=lambda: (
-                        AuthManager.logout(),
-                        UIComponents.safe_navigate('/login')
-                    )
-                ).props('unelevated size=sm').style('''
-                    background:#F9A8D4;
-                    color:white;
-                    font-weight:700;
-                    border-radius:14px;
-                ''')
+                @ui.refreshable
+                def navbar_widget_slot():
+                    widget = app.storage.client.get('status_widget') or status_widget
+                    if widget:
+                        widget()
+                
+                navbar_widget_slot()
+                app.storage.client['refresh_navbar_widget'] = navbar_widget_slot.refresh
+                
+                # Area Menu Utilitas (Statistik & Profil) - Desain Kapsul Low Cognitive
+                with ui.row().classes('items-center gap-1 mr-2 bg-white/40 px-2 py-1 rounded-full border border-white/60 shadow-sm backdrop-blur-md'):
+                    
+                    def show_about():
+                        from app.ui.about_card import show_about_dialog
+                        show_about_dialog()
 
+                    ui.button(icon='info', on_click=show_about) \
+                        .props('flat round size=sm') \
+                        .classes('text-gray-600 hover:bg-white hover:text-purple-600 transition-all') \
+                        .tooltip('Tentang Aplikasi (Tutorial)')
+                    
+                    ui.separator().props('vertical').classes('h-4 opacity-40 mx-1')
+
+                    ui.button(icon='bar_chart', on_click=lambda: UIComponents.safe_navigate('/stats')) \
+                        .props('flat round size=sm') \
+                        .classes('text-gray-600 hover:bg-white hover:text-blue-600 transition-all') \
+                        .tooltip('Statistik Anda')
+                        
+                    ui.separator().props('vertical').classes('h-4 opacity-40 mx-1')
+                        
+                    ui.button(icon='person', on_click=lambda: UIComponents.safe_navigate('/profile')) \
+                        .props('flat round size=sm') \
+                        .classes('text-gray-600 hover:bg-white hover:text-pink-600 transition-all') \
+                        .tooltip('Profil Pengguna')
+                
+                ui.button('Logout', on_click=lambda: (AuthManager.logout(), UIComponents.safe_navigate('/login'))).classes('btn-primary shadow-sm').props('unelevated size=sm')
     @staticmethod
-    def sidebar() -> None:
+    def sidebar(force: bool = False) -> None:
         """Merender sidebar kiri dengan gaya Glassmorphism dan dukungan Mini Mode."""
         from nicegui import app, ui
+        from app.context import state
+        
+        # SPA Mode: Jika dipanggil dari dalam halaman, jangan buat ulang sidebar
+        if getattr(state, 'spa_mode', False) and not force:
+            return
+            
         is_mini = app.storage.user.get('sidebar_mini', False)
         
         # Persiapkan props dasar
@@ -86,7 +139,7 @@ class UIComponents:
         if is_mini:
             drawer_props += ' mini'
             
-        with ui.left_drawer(value=True).classes('bg-transparent p-0 overflow-hidden border-none sidebar-transition') \
+        with ui.left_drawer(value=True).classes('bg-transparent p-0 overflow-hidden border-none') \
             .props(drawer_props) as drawer:
             
             # Background blur container
@@ -109,18 +162,13 @@ class UIComponents:
                     ('compare_arrows', 'Bandingkan', '/compare'),
                     ('event_note', 'Routine Planner', '/routine'),
                     ('favorite', 'Wishlist', '/wishlist'),
-                    ('bar_chart', 'Statistik', '/stats'),
-                    ('smart_toy', 'Tanya AI', '/chat'),
-                    ('person', 'Profil', '/profile'),
+                    
+                    ('smart_toy', 'SkintifAI', '/chat'),
                 ]
 
                 with ui.column().classes('w-full gap-2'):
                     for icon, label, path in menu_items:
-                        # Sembunyikan 'Tanya AI' jika user bukan admin
-                        if path == '/chat' and app.storage.user.get('role') != 'admin':
-                            continue
-
-                        with ui.row().classes('w-full items-center gap-4 px-4 py-3 rounded-2xl cursor-pointer transition-all hover:bg-white/40 hover:translate-x-2 group sidebar-item-row') \
+                        with ui.row().classes('w-full items-center gap-4 px-4 py-3 rounded-2xl cursor-pointer hover:bg-white/40 group sidebar-item-row') \
                             .on('click', lambda p=path: UIComponents.safe_navigate(p)):
                             ui.icon(icon, size='24px').classes('text-gray-500 group-hover:text-[#C8607A]')
                             ui.label(label).classes('text-sm font-bold text-gray-600 group-hover:text-gray-800 tracking-wide sidebar-label')
@@ -128,7 +176,7 @@ class UIComponents:
                     # --- MENU ADMIN (Hanya tampil untuk role admin) ---
                     if app.storage.user.get('role') == 'admin':
                         ui.separator().classes('my-2 opacity-30')
-                        with ui.row().classes('w-full items-center gap-4 px-4 py-3 rounded-2xl cursor-pointer transition-all hover:bg-blue-100/40 hover:translate-x-2 group sidebar-item-row') \
+                        with ui.row().classes('w-full items-center gap-4 px-4 py-3 rounded-2xl cursor-pointer hover:bg-blue-100/40 group sidebar-item-row') \
                             .on('click', lambda: UIComponents.safe_navigate('/admin')):
                             ui.icon('admin_panel_settings', size='24px').classes('text-blue-400 group-hover:text-[#1E88E5]')
                             ui.label('Admin Panel').classes('text-sm font-bold text-blue-400 group-hover:text-[#1E88E5] tracking-wide sidebar-label')
@@ -143,14 +191,14 @@ class UIComponents:
         """Komponen Traffic Light System untuk Taskbar (Self-Explanatory UX)."""
         
         status = analysis_data.get("status", "empty")
+        if status == "empty":
+            return
+            
         warnings_count = len(analysis_data.get("warnings", []))
 
         # Kotak Badge dengan Flexbox bergaya Glassmorphism
         with ui.row().classes('items-center gap-2 px-4 py-2 rounded-full glass-badge transition-all'):
-            if status == "empty":
-                ui.icon('radio_button_unchecked', size='18px', color='grey-400')
-                ui.label('Rutinitas Kosong').classes('text-xs font-bold text-gray-500 tracking-wide uppercase')
-            elif status == "safe":
+            if status == "safe":
                 ui.icon('check_circle', size='18px', color='green-500').classes('animate-pulse-soft')
                 ui.label('Status: Aman').classes('text-xs font-extrabold text-green-700 tracking-wide uppercase')
             elif status == "danger":
@@ -357,7 +405,6 @@ class UIComponents:
         </svg>
         """
         with ui.column().classes('w-full items-center justify-center py-10 gap-3'):
-            ui.html(svg_code)
             ui.label('Rutinitas Masih Kosong').classes('text-md font-bold text-gray-500 mt-2')
             ui.label('Pilih produk dari katalog di sebelah kiri untuk mulai mengecek kecocokan bahan.').classes('text-xs text-gray-400 text-center px-4 leading-relaxed')
     @staticmethod
@@ -424,3 +471,5 @@ class UIComponents:
             with ui.column().classes('safe-status w-full mb-4'):
                 ui.label("✅ Rutinitas Aman").classes('text-sm font-extrabold text-green-800 tracking-wide')
                 ui.label("Tidak terdeteksi konflik bahan aktif yang berbahaya.").classes('text-xs text-green-700 mt-1 font-medium')
+from typing import Any, Callable
+

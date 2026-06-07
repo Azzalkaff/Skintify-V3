@@ -61,6 +61,29 @@ class AuthManager:
                 app.storage.user['username']      = user_data.get('username')
                 app.storage.user['city']          = user_data.get('city', 'Jakarta')
                 app.storage.user['role']          = user_data.get('role', 'user')
+                
+                # Load Profile & Onboarding Data
+                app.storage.user['skin_type'] = user_data.get('skin_type')
+                app.storage.user['onboarding_completed'] = bool(user_data.get('onboarding_completed', 0))
+                app.storage.user['has_seen_about'] = bool(user_data.get('has_seen_about', 0))
+                
+                import json
+                def _parse_json_field(field_name, default=[]):
+                    val = user_data.get(field_name)
+                    if not val:
+                        return default
+                    try:
+                        return json.loads(val)
+                    except Exception:
+                        return default
+
+                app.storage.user['wishlist'] = BasisData.ambil_wishlist(user_data.get('email'))
+                app.storage.user['avoid_ingredients'] = _parse_json_field('avoid_ingredients')
+                app.storage.user['skin_issues'] = _parse_json_field('skin_issues')
+                app.storage.user['skincare_goals'] = _parse_json_field('skincare_goals')
+                app.storage.user['lifestyle'] = _parse_json_field('lifestyle')
+                
+                    
                 return True, "Login berhasil!"
             return False, "Password salah!"
         elif identifier in AuthManager.DATABASE_PENGGUNA:
@@ -86,17 +109,20 @@ class AuthManager:
         # Kirim Email asinkron (tidak memblokir UI)
         sukses = await LayananEmail.kirim_otp(email, kode_otp)
         
+        # Simpan ke memori sesi OTP dalam kondisi sukses ataupun gagal (untuk mendukung Development Fallback)
+        AuthManager.PENYIMPANAN_OTP[email] = {
+            "otp": kode_otp,
+            "username": username,
+            "password": password,
+            "role": role,
+            "exp": time.time() + 300
+        }
+        
         if sukses:
-            AuthManager.PENYIMPANAN_OTP[email] = {
-                "otp": kode_otp,
-                "username": username,
-                "password": password,
-                "role": role,
-                "exp": time.time() + 300
-            }
             return True, f"Kode OTP telah dikirim ke {email}"
         else:
-            return False, "Gagal mengirim email."
+            # Tetap return True agar user bisa menginput OTP dari konsol terminal lokal
+            return True, f"⚠️ Layanan email sibuk. [Dev Mode] Silakan cek kode OTP di konsol terminal Anda."
 
     @staticmethod
     async def verifikasi_dan_daftar(email: str, otp_input: str) -> Tuple[bool, str]:
@@ -124,6 +150,9 @@ class AuthManager:
     def logout() -> None:
         app.storage.user['authenticated'] = False
         app.storage.user['role'] = None
+        app.storage.user['username'] = None
+        app.storage.user['email'] = None
+        app.storage.user['wishlist'] = []
 
     @staticmethod
     def require_auth():

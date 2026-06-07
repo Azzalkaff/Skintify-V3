@@ -1,428 +1,196 @@
 import json
-
-
-
 import asyncio
-
-
+import logging
 
 from nicegui import ui, app
-
-
-
 from app.context import data_mgr, state
-
-
-
 from app.ui.components import UIComponents
-
-
-
 from app.auth.auth import AuthManager
-
-
-
 from app.database.engine import SessionLocal, simpan_hasil
+from app.database.models import Produk, Toko, SociollaReferensi
+from app.services.routine_service import RoutineService
 
-
-
-from app.database.models import Produk
-
-
-
-
-
+logger = logging.getLogger(__name__)
 
 
 def scrape_marketplace_live(product_id: int, brand: str, name: str):
     from app.database.engine import SessionLocal, simpan_hasil
     from app.scraping.tokopedia_scraper import ambil_top_toko as ambil_tokopedia
     from app.scraping.lazada_scraper import ambil_top_toko as ambil_lazada
+    # from app.scraping.shopee_scraper import ambil_top_toko as ambil_shopee  # ❌ DIMATIKAN
+
     keyword = f"{brand} {name}".strip()
+
     # 1. Scrape Tokopedia
     try:
-        tokopedia_products, tokopedia_shops, total_data = ambil_tokopedia(keyword, top_n=5)
+        res = ambil_tokopedia(keyword, top_n=15)
+        if isinstance(res, tuple) and len(res) == 3:
+            tokopedia_products, tokopedia_shops, total_data = res
+        else:
+            tokopedia_products, tokopedia_shops = res
+            total_data = len(tokopedia_products)
+
         if tokopedia_products:
             with SessionLocal() as session:
                 simpan_hasil(session, "tokopedia", keyword, tokopedia_products, tokopedia_shops, total_data, referensi_id=product_id)
                 session.commit()
     except Exception as e:
-        print(f"Error scraping Tokopedia live: {e}")
+        logger.warning(f"Error scraping Tokopedia live: {e}")
+
     # 2. Scrape Lazada
     try:
-        lazada_products, lazada_shops = ambil_lazada(keyword, top_n=5)
+        lazada_products, lazada_shops = ambil_lazada(keyword, top_n=15)
         if lazada_products:
             with SessionLocal() as session:
                 simpan_hasil(session, "lazada", keyword, lazada_products, lazada_shops, len(lazada_products), referensi_id=product_id)
                 session.commit()
     except Exception as e:
-        print(f"Error scraping Lazada live: {e}")
-def buka_modal_detail(product: dict):
-    from app.ui.pages.syhid.search_page import get_best_marketplace_product
-    # Pre-fetch fuzzy matches for immediate rendering fallback
-    topo_fuzzy = get_best_marketplace_product(product, 'tokopedia')
-    laza_fuzzy = get_best_marketplace_product(product, 'lazada')
-    shope_fuzzy = get_best_marketplace_product(product, 'shopee')
-    dialog = ui.dialog()
-    with dialog, ui.card().classes('w-[90vw] max-w-4xl p-0 rounded-3xl bg-white border border-rose-100 shadow-2xl overflow-hidden flex flex-col').style('height: 80vh; max-height: 900px;'):
-        # Modal Header (Gradient background)
-        with ui.row().classes('w-full bg-gradient-to-r from-rose-50 to-pink-50/50 p-6 items-center justify-between border-b border-rose-100/60 no-wrap'):
-            with ui.row().classes('items-center gap-4 no-wrap flex-1'):
-                # Image
-                if product.get('image_url'):
-                    ui.image(product['image_url']).classes('w-20 h-20 rounded-2xl object-contain bg-white shadow-sm border border-rose-100/50 flex-shrink-0')
-                with ui.column().classes('gap-0.5'):
-                    ui.label(product.get('brand', '-').upper()).classes('text-[10px] font-black text-pink-500 tracking-widest')
-                    ui.label(product.get('product_name', '-')).classes('text-xl font-black text-gray-800 leading-tight line-clamp-1')
-                    ui.label(product.get('category', '-')).classes('text-xs text-gray-400 font-bold')
-            # Close Button
-            ui.button(icon='close', on_click=dialog.close).props('flat round size=md').classes('text-gray-400 hover:text-pink-500 transition-colors')
-        # Modal Scrollable Content
-        with ui.scroll_area().classes('w-full flex-grow p-6'):
-            with ui.grid(columns='1 lg:grid-cols-3').classes('w-full gap-6 items-stretch'):
-                # KOLOM 1 & 2: Informasi Detail, Kandungan Aktif, dan Reviews
-                with ui.column().classes('col-span-1 lg:col-span-2 gap-4'):
-                    # TABS SELECTOR (NiceGUI Tabs)
-                    with ui.tabs().classes('w-full border-b border-gray-100') as detail_tabs:
-                        tab_kandungan = ui.tab('kandungan', label='🔬 Bahan Aktif')
-                        tab_reviews = ui.tab('reviews', label='⭐ Ulasan Asli')
-                        tab_ingredients = ui.tab('ingredients', label='📋 Semua Bahan')
-                    with ui.tab_panels(detail_tabs, value='kandungan').classes('w-full bg-transparent p-0 mt-3') as panels:
-                        # PANEL 1: Kandungan Aktif & Keamanan
-                        with ui.tab_panel('kandungan'):
-                            # Load profile
-                            profile = data_mgr.get_ingredient_profile(product)
-                            if profile:
-                                active_ings = profile.get("active_ingredients", [])
-                                comedogenic = profile.get("comedogenic_rating", 0)
-                                irritancy = profile.get("irritant_rating", 0)
-                                # Comedogenic & Irritant Badges
-                                with ui.row().classes('w-full gap-4 mb-4 flex-wrap'):
-                                    # Comedogenic badge
-                                    comedo_color = 'red' if comedogenic >= 3 else ('amber' if comedogenic >= 1 else 'green')
-                                    comedo_txt = f'Komedogenik: {comedogenic}/5'
-                                    with ui.element('div').classes(f'bg-{comedo_color}-50 text-{comedo_color}-600 border border-{comedo_color}-100 px-3 py-1.5 rounded-xl text-xs font-black flex items-center gap-1.5'):
-                                        ui.icon('pest_control' if comedogenic >= 3 else 'check_circle', size='xs')
-                                        ui.label(comedo_txt)
-                                    # Irritant badge
-                                    irrit_color = 'red' if irritancy >= 3 else ('amber' if irritancy >= 1 else 'green')
-                                    irrit_txt = f'Tingkat Iritasi: {irritancy}/5'
-                                    with ui.element('div').classes(f'bg-{irrit_color}-50 text-{irrit_color}-600 border border-{irrit_color}-100 px-3 py-1.5 rounded-xl text-xs font-black flex items-center gap-1.5'):
-                                        ui.icon('warning' if irritancy >= 3 else 'check_circle', size='xs')
-                                        ui.label(irrit_txt)
-                                # Active Ingredients List
-                                ui.label('BAHAN AKTIF UTAMA YANG TERDETEKSI:').classes('text-[10px] font-black text-gray-400 tracking-wider mb-2')
-                                if active_ings:
-                                    with ui.row().classes('w-full gap-2 flex-wrap mb-4'):
-                                        for act in active_ings:
-                                            ui.badge(act.title(), color='pink').classes('text-[10px] font-black px-3 py-1 rounded-full uppercase')
-                                else:
-                                    ui.label('Tidak ada bahan aktif keras berisiko tinggi yang terdeteksi (sangat aman & lembut untuk penggunaan umum).').classes('text-xs text-green-600 font-bold bg-green-50 p-3 rounded-xl w-full')
-                                # Warnings
-                                from app.services.analyzer import SkincareAnalyzer
-                                warnings = []
-                                ingredients_set = {item.strip().lower() for item in (product.get("ingredients") or "").split(',') if item.strip()}
-                                warnings.extend(SkincareAnalyzer.check_routine_safety(ingredients_set))
-                                warnings.extend(SkincareAnalyzer.check_comedogenicity(profile))
-                                warnings.extend(SkincareAnalyzer.check_irritancy_load(profile))
-                                if warnings:
-                                    ui.label('PERINGATAN KEAMANAN KULIT:').classes('text-[10px] font-black text-red-400 tracking-wider mb-2')
-                                    with ui.column().classes('w-full gap-2'):
-                                        for w in warnings:
-                                            with ui.element('div').classes('bg-red-50 text-red-700 border border-red-100 p-3 rounded-xl text-xs font-bold w-full flex items-start gap-2'):
-                                                ui.label(w)
-                            else:
-                                ui.label('Analisis bahan aktif belum tersedia untuk produk ini.').classes('text-sm text-gray-400 italic')
-                        # PANEL 2: Ulasan Asli (Reviews)
-                        with ui.tab_panel('reviews'):
-                            rev_str = product.get('reviews', '') or '[]'
-                            try:
-                                rev_list = json.loads(rev_str) if isinstance(rev_str, str) else rev_str
-                            except Exception:
-                                rev_list = []
-                            if rev_list and isinstance(rev_list, list):
-                                with ui.column().classes('w-full gap-3'):
-                                    for r in rev_list[:5]: # Tampilkan max 5 review teratas
-                                        author = r.get('user_name') or r.get('author') or r.get('user') or 'Pengguna Anonim'
-                                        rating = r.get('rating') or r.get('rating_value') or r.get('star') or 5
-                                        content = r.get('review_text') or r.get('content') or r.get('body') or '-'
-                                        with ui.card().classes('w-full p-4 border border-gray-100 bg-gray-50/30 rounded-2xl shadow-sm'):
-                                            with ui.row().classes('w-full justify-between items-center no-wrap mb-1'):
-                                                ui.label(author).classes('text-xs font-black text-gray-700')
-                                                with ui.row().classes('items-center gap-0.5'):
-                                                    ui.icon('star', color='warning', size='xs')
-                                                    ui.label(f'{rating}').classes('text-xs text-gray-500 font-bold')
-                                            ui.label(content).classes('text-xs text-gray-600 font-medium leading-relaxed italic')
-                            else:
-                                ui.label('Belum ada ulasan pengguna untuk produk ini di database.').classes('text-sm text-gray-400 italic')
-                        # PANEL 3: Semua Bahan (Ingredients List)
-                        with ui.tab_panel('ingredients'):
-                            ui.label('DAFTAR BAHAN LENGKAP (FULL INGREDIENTS):').classes('text-[10px] font-black text-gray-400 tracking-wider mb-2')
-                            ui.label(product.get('ingredients') or 'Data bahan lengkap belum tersedia.').classes('text-xs text-gray-600 font-medium leading-relaxed bg-gray-50 p-4 rounded-2xl border border-gray-100/50')
-                # KOLOM 3: Perbandingan Harga Marketplace & Live Scraper Button
-                with ui.column().classes('col-span-1 bg-rose-50/20 border border-rose-100/50 rounded-2xl p-4 gap-4 flex flex-col justify-between'):
-                    with ui.column().classes('w-full gap-4'):
-                        ui.label('PEMBANDING HARGA MARKETPLACE').classes('text-[10px] font-black text-pink-500 tracking-widest text-center border-b border-pink-100/50 pb-2 w-full')
-                        # Container untuk List Harga Marketplace
-                        prices_container = ui.column().classes('w-full gap-2')
-                        def refresh_prices():
-                            prices_container.clear()
-                            with prices_container:
-                                from sqlalchemy.orm import joinedload
-                                with SessionLocal() as s:
-                                    db_products = s.query(Produk).options(joinedload(Produk.toko)).filter(
-                                        Produk.referensi_id == product.get('id')
-                                    ).all()
-                                    mapped_products = []
-                                    for p in db_products:
-                                        mapped_products.append({
-                                            'platform': p.platform,
-                                            'harga': p.harga,
-                                            'url': p.url,
-                                            'toko_nama': p.toko.nama if p.toko else 'Toko Partner',
-                                            'rating': p.rating,
-                                            'terjual': p.terjual,
-                                            'gambar': p.gambar,
-                                            'jumlah_review': p.jumlah_review
-                                        })
-                                    tokoped_db = [p for p in mapped_products if p['platform'].lower() == 'tokopedia']
-                                    lazad_db = [p for p in mapped_products if p['platform'].lower() == 'lazada']
-                                    shopee_db = [p for p in mapped_products if p['platform'].lower() == 'shopee']
-                                
-                                # Reusable Premium Platform Card
-                                def render_platform_card(platform_name: str, card_border_class: str, hover_bg_class: str, icon_color_style: str, text_color_class: str, title: str, subtitle: str, price: float, url: str, image: str, rating: float, terjual: int, reviews_count: int = 0):
-                                    price_text = f"Rp {int(price):,}".replace(',', '.') if price else "Rp -"
-                                    img_url = image if image and str(image).startswith('http') else 'https://via.placeholder.com/150?text=No+Image'
-                                    
-                                    with ui.link('', target=url, new_tab=True).classes('w-full text-current no-underline'):
-                                        with ui.card().classes(f'w-full p-3 border {card_border_class} bg-white rounded-2xl transition-all duration-300 shadow-sm hover:shadow-md flex flex-row items-center gap-3 no-wrap {hover_bg_class}'):
-                                            # Left: Product Image
-                                            ui.image(img_url).classes('w-12 h-12 rounded-xl object-contain bg-white border border-gray-100 flex-shrink-0')
-                                            
-                                            # Middle: Details
-                                            with ui.column().classes('gap-0.5 flex-1 min-w-0'):
-                                                # Platform Badge
-                                                with ui.row().classes('items-center gap-1.5 no-wrap'):
-                                                    ui.icon('shopping_bag' if platform_name == 'sociolla' else 'store', size='sm').style(icon_color_style)
-                                                    ui.label(title).classes(f'text-xs font-black {text_color_class} uppercase tracking-wide')
-                                                
-                                                # Shop Name
-                                                ui.label(subtitle).classes('text-[9px] text-gray-400 font-bold line-clamp-1')
-                                                
-                                                # Rating & Sold count
-                                                with ui.row().classes('items-center gap-2 mt-0.5 flex-wrap'):
-                                                    if rating:
-                                                        with ui.row().classes('items-center gap-0.5 no-wrap'):
-                                                            ui.icon('star', color='warning', size='12px')
-                                                            ui.label(f"{rating:.1f}" if isinstance(rating, (int, float)) else str(rating)).classes('text-[9px] font-black text-gray-700')
-                                                            if reviews_count:
-                                                                ui.label(f"({reviews_count})").classes('text-[8px] text-gray-400')
-                                                    if terjual:
-                                                        with ui.row().classes('items-center gap-0.5 no-wrap'):
-                                                            ui.icon('shopping_bag', color='grey-500', size='12px')
-                                                            ui.label(f"{terjual:,}+ terjual".replace(',', '.')).classes('text-[9px] font-bold text-gray-500')
-                                            
-                                            # Right: Price & Link
-                                            with ui.column().classes('items-end justify-center flex-shrink-0 gap-1'):
-                                                ui.label(price_text).classes(f'text-sm font-extrabold {text_color_class}')
-                                                ui.icon('open_in_new', size='xs').classes('text-gray-400')
+        logger.warning(f"Error scraping Lazada live: {e}")
 
-                                # 1. Tampilkan Sociolla Card (Original Source)
-                                render_platform_card(
-                                    platform_name='sociolla',
-                                    card_border_class='border-pink-100',
-                                    hover_bg_class='hover:bg-pink-50/30',
-                                    icon_color_style='color: #EC4899;',
-                                    text_color_class='text-pink-600',
-                                    title='Sociolla (Original)',
-                                    subtitle='Official Store',
-                                    price=product.get('min_price', 0),
-                                    url=product.get('url_sociolla') or product.get('url') or 'https://www.sociolla.com',
-                                    image=product.get('image_url'),
-                                    rating=product.get('average_rating') or product.get('rating'),
-                                    terjual=0,
-                                    reviews_count=product.get('total_reviews', 0)
-                                )
-                                # 2. Tampilkan Tokopedia Card
-                                if tokoped_db:
-                                    sorted_t = sorted(tokoped_db, key=lambda x: x['harga'] or float('inf'))
-                                    for t_item in sorted_t[:3]: # Tampilkan hingga 3 toko termurah
-                                        render_platform_card(
-                                            platform_name='tokopedia',
-                                            card_border_class='border-green-100',
-                                            hover_bg_class='hover:bg-green-50/30',
-                                            icon_color_style='color: #10B981;',
-                                            text_color_class='text-green-600',
-                                            title='Tokopedia',
-                                            subtitle=t_item['toko_nama'],
-                                            price=t_item['harga'],
-                                            url=t_item['url'],
-                                            image=t_item.get('gambar'),
-                                            rating=t_item.get('rating'),
-                                            terjual=t_item.get('terjual', 0),
-                                            reviews_count=t_item.get('jumlah_review', 0)
-                                        )
-                                else:
-                                    # Fallback fuzzy
-                                    if topo_fuzzy:
-                                        render_platform_card(
-                                            platform_name='tokopedia',
-                                            card_border_class='border-green-100',
-                                            hover_bg_class='hover:bg-green-50/30',
-                                            icon_color_style='color: #10B981;',
-                                            text_color_class='text-green-600',
-                                            title='Tokopedia (Fuzzy)',
-                                            subtitle=topo_fuzzy.get('shop_name') or 'Toko Partner',
-                                            price=topo_fuzzy['price'],
-                                            url=topo_fuzzy['url'],
-                                            image=topo_fuzzy.get('gambar'),
-                                            rating=topo_fuzzy.get('rating'),
-                                            terjual=topo_fuzzy.get('terjual', 0),
-                                            reviews_count=topo_fuzzy.get('jumlah_review', 0)
-                                        )
-                                    else:
-                                        with ui.card().classes('w-full p-3 border border-dashed border-gray-200 bg-white rounded-xl'):
-                                            with ui.row().classes('w-full justify-between items-center no-wrap'):
-                                                ui.label('Tokopedia').classes('text-xs font-bold text-gray-400')
-                                                ui.label('Tidak Ditemukan').classes('text-xs text-gray-400 italic')
-                                # 3. Tampilkan Lazada Card
-                                if lazad_db:
-                                    sorted_l = sorted(lazad_db, key=lambda x: x['harga'] or float('inf'))
-                                    for l_item in sorted_l[:3]: # Tampilkan hingga 3 toko termurah
-                                        render_platform_card(
-                                            platform_name='lazada',
-                                            card_border_class='border-blue-100',
-                                            hover_bg_class='hover:bg-blue-50/30',
-                                            icon_color_style='color: #2563EB;',
-                                            text_color_class='text-blue-600',
-                                            title='Lazada',
-                                            subtitle=l_item['toko_nama'],
-                                            price=l_item['harga'],
-                                            url=l_item['url'],
-                                            image=l_item.get('gambar'),
-                                            rating=l_item.get('rating'),
-                                            terjual=l_item.get('terjual', 0),
-                                            reviews_count=l_item.get('jumlah_review', 0)
-                                        )
-                                else:
-                                    # Fallback fuzzy
-                                    if laza_fuzzy:
-                                        render_platform_card(
-                                            platform_name='lazada',
-                                            card_border_class='border-blue-100',
-                                            hover_bg_class='hover:bg-blue-50/30',
-                                            icon_color_style='color: #2563EB;',
-                                            text_color_class='text-blue-600',
-                                            title='Lazada (Fuzzy)',
-                                            subtitle=laza_fuzzy.get('shop_name') or 'Toko Partner',
-                                            price=laza_fuzzy['price'],
-                                            url=laza_fuzzy['url'],
-                                            image=laza_fuzzy.get('gambar'),
-                                            rating=laza_fuzzy.get('rating'),
-                                            terjual=laza_fuzzy.get('terjual', 0),
-                                            reviews_count=laza_fuzzy.get('jumlah_review', 0)
-                                        )
-                                    else:
-                                        with ui.card().classes('w-full p-3 border border-dashed border-gray-200 bg-white rounded-xl'):
-                                            with ui.row().classes('w-full justify-between items-center no-wrap'):
-                                                ui.label('Lazada').classes('text-xs font-bold text-gray-400')
-                                                ui.label('Tidak Ditemukan').classes('text-xs text-gray-400 italic')
-                                # 4. Tampilkan Shopee Card
-                                if shopee_db:
-                                    sorted_s = sorted(shopee_db, key=lambda x: x['harga'] or float('inf'))
-                                    for s_item in sorted_s[:3]: # Tampilkan hingga 3 toko termurah
-                                        render_platform_card(
-                                            platform_name='shopee',
-                                            card_border_class='border-orange-100',
-                                            hover_bg_class='hover:bg-orange-50/30',
-                                            icon_color_style='color: #EA580C;',
-                                            text_color_class='text-orange-600',
-                                            title='Shopee',
-                                            subtitle=s_item['toko_nama'],
-                                            price=s_item['harga'],
-                                            url=s_item['url'],
-                                            image=s_item.get('gambar'),
-                                            rating=s_item.get('rating'),
-                                            terjual=s_item.get('terjual', 0),
-                                            reviews_count=s_item.get('jumlah_review', 0)
-                                        )
-                                else:
-                                    if shope_fuzzy:
-                                        render_platform_card(
-                                            platform_name='shopee',
-                                            card_border_class='border-orange-100',
-                                            hover_bg_class='hover:bg-orange-50/30',
-                                            icon_color_style='color: #EA580C;',
-                                            text_color_class='text-orange-600',
-                                            title='Shopee (Fuzzy)',
-                                            subtitle=shope_fuzzy.get('shop_name') or 'Toko Partner',
-                                            price=shope_fuzzy['price'],
-                                            url=shope_fuzzy['url'],
-                                            image=shope_fuzzy.get('gambar'),
-                                            rating=shope_fuzzy.get('rating'),
-                                            terjual=shope_fuzzy.get('terjual', 0),
-                                            reviews_count=shope_fuzzy.get('jumlah_review', 0)
-                                        )
-                                    else:
-                                        with ui.card().classes('w-full p-3 border border-dashed border-gray-200 bg-white rounded-xl'):
-                                            with ui.row().classes('w-full justify-between items-center no-wrap'):
-                                                ui.label('Shopee').classes('text-xs font-bold text-gray-400')
-                                                ui.label('Tidak Ditemukan').classes('text-xs text-gray-400 italic')
-                        refresh_prices()
-                    # Live Scraper Trigger Button & Loading Spinner
-                    with ui.column().classes('w-full gap-2 items-center'):
-                        loading_spinner = ui.spinner(size='md', color='pink').classes('hidden')
-                        loading_label = ui.label('Memicu Sentinel Scraper...').classes('text-[10px] text-pink-500 font-bold hidden animate-pulse')
-                        async def jalankan_live_scraping():
-                            # Tunjukkan loading spinner
-                            loading_spinner.classes(remove='hidden')
-                            loading_label.classes(remove='hidden')
-                            scrape_btn.disable()
-                            # Jalankan scraping asinkron
-                            loop = asyncio.get_event_loop()
-                            await loop.run_in_executor(
-                                None,
-                                scrape_marketplace_live,
-                                product.get('id'),
-                                product.get('brand', ''),
-                                product.get('product_name', '')
-                            )
-                            # Sembunyikan loading spinner & refresh
-                            loading_spinner.classes('hidden')
-                            loading_label.classes('hidden')
-                            scrape_btn.enable()
-                            ui.notify('🚀 Harga Tokopedia & Lazada berhasil di-update secara live!', color='green', icon='flash_on')
-                            refresh_prices()
-                        scrape_btn = ui.button(
-                            'Cari Harga Live ⚡',
-                            on_click=jalankan_live_scraping
-                        ).classes('w-full bg-gradient-to-r from-pink-500 to-rose-400 text-white rounded-xl font-bold py-2.5 shadow-md hover:scale-[1.02] transition-all').props('no-caps icon=flash_on')
-    dialog.open()
+    # 3. Scrape Shopee ❌ DIMATIKAN (untuk tidak menghalangi Tokopedia & Lazada)
+    # try:
+    #     shopee_products, shopee_shops = ambil_shopee(keyword, top_n=5)
+    #     if shopee_products:
+    #         with SessionLocal() as session:
+    #             simpan_hasil(session, "shopee", keyword, shopee_products, shopee_shops, len(shopee_products), referensi_id=product_id)
+    #             session.commit()
+    # except Exception as e:
+    #     logger.warning(f"Error scraping Shopee live: {e}")
+
+
+from app.ui.product_detail_modal import show_shared_product_detail as buka_modal_detail
+
+
+"""
+Halaman Wishlist (Daftar Keinginan) Skintify
+Dibuat oleh: Syaqila
+Halaman ini bertugas untuk menampilkan produk-produk yang disimpan oleh pengguna,
+termasuk melakukan pengecekan harga langsung ke toko online.
+"""
 def show_page():
-    """MISI SYAQILA: Membuat Galeri Wishlist"""
-    # --- JANGAN DIUBAH (Wajib untuk Navigasi) ---
+    
+    # Memeriksa apakah pengguna sudah login, jika belum kembalikan ke halaman login
     auth_redirect = AuthManager.require_auth()
     if auth_redirect: return auth_redirect
+    
+    # Menampilkan menu navigasi atas dan samping (Komponen Bersama)
     UIComponents.navbar()
     UIComponents.sidebar()
-    # -------------------------------------------
-    # --- 🚀 MULAI KERJAKAN DI SINI (AREA BELAJAR SYAQILA) ---
-    # Data produk wishlist (nanti bisa diganti dari data_mgr)
-    # --- 🚀 AREA WISHLIST DINAMIS ---
+
+    # ui.column() menyusun seluruh elemen di halaman ini dari atas ke bawah
     with ui.column().classes('w-full p-8 bg-rose-50/30 min-h-screen gap-4'):
-        # HEADER (Poin 4: Tipografi & Sudut Modern)
+        
+        # 1. BAGIAN KEPALA HALAMAN (HEADER)
+        # ui.row() menyusun teks "Wishlist" dan tipe kulit pengguna agar bersebelahan
         with ui.row().classes('w-full items-center justify-between pb-4 border-b border-pink-100/50'):
             ui.label('Wishlist').classes('text-3xl font-extrabold tracking-tight text-gray-800')
             with ui.element('div').classes('bg-gradient-to-r from-pink-100 to-rose-100 px-5 py-2 rounded-2xl shadow-sm'):
                 skin_type = app.storage.user.get('skin_type', 'Belum diisi')
                 ui.label(f'Tipe Kulit: {skin_type}').classes('text-pink-600 text-sm font-bold tracking-wide')
+        
+        # Variabel penyimpanan sementara untuk mengingat filter kategori apa yang sedang dipilih
+        filter_state = {'category': 'Semua'}
+        
+        # @ui.refreshable adalah sebuah mantra (fungsi khusus) agar bagian dalam fungsi ini 
+        # bisa diperbarui/digambar ulang secara instan tanpa perlu memuat ulang seluruh web (refresh page).
         @ui.refreshable
         def render_wishlist():
-            wishlist_products = state.wishlist
+            # Mengambil daftar wishlist dari sistem utama
+            raw_wishlist = state.wishlist or []
+            
+            # --- BAGIAN TOMBOL FILTER KATEGORI ---
+            active_cat = filter_state['category']
+            main_cats = ['Cleanser', 'Toner', 'Serum', 'Moisturizer', 'Sunscreen']
+            
+            if raw_wishlist:
+                ui.label('KATEGORI IMPIAN').classes('text-[10px] font-black text-pink-400 uppercase tracking-widest mt-2')
+                with ui.row().classes('w-full gap-2 flex-wrap mb-2'):
+                    cats = ['Semua'] + main_cats + ['Lainnya']
+                    for c in cats:
+                        def set_cat(selected=c):
+                            filter_state['category'] = selected
+                            render_wishlist.refresh()
+                        
+                        is_active = filter_state['category'] == c
+                        if is_active:
+                            ui.button(c, on_click=set_cat).props('unelevated rounded size=sm color=pink-4 text-color=white').classes('font-bold px-4 py-1 shadow-md')
+                        else:
+                            ui.button(c, on_click=set_cat).props('outline rounded size=sm color=pink-2 text-color=grey-7').classes('font-bold px-4 py-1 bg-white hover:bg-pink-50')
+            
+            wishlist_products = []
+            if active_cat == 'Semua':
+                wishlist_products = raw_wishlist
+            else:
+                for p in raw_wishlist:
+                    cat = str(p.get('category', '')).lower()
+                    if active_cat == 'Lainnya':
+                        if not any(mc.lower() in cat for mc in main_cats):
+                            wishlist_products.append(p)
+                    else:
+                        if active_cat.lower() in cat:
+                            wishlist_products.append(p)
+            # --- END CATEGORY FILTER ---
             def hapus_produk(slug: str):
                 state.wishlist = [p for p in state.wishlist if p.get('slug') != slug]
+                
+                # Hapus dari set if exists
+                if hasattr(state, 'wishlist_slugs'):
+                    state.wishlist_slugs.discard(slug)
+                
+                # SIMPAN PERUBAHAN KE DATABASE PERMANEN O(1)
+                email = app.storage.user.get('email')
+                if email:
+                    from app.database.database_manager import BasisData
+                    BasisData.hapus_dari_wishlist(email, slug)
+                    
                 ui.notify('Produk dihapus dari Wishlist', color='pink')
                 render_wishlist.refresh()
+
+            def dialog_pindah_rutin(product):
+                user_email = app.storage.user.get('email')
+                with SessionLocal() as session:
+                    user = RoutineService.get_or_create_user(session, user_email)
+                    routines = RoutineService.get_user_routines(session, user.id)
+                
+                if not routines:
+                    ui.notify('Anda belum memiliki Rutinitas. Buat di Routine Planner dulu!', color='warning')
+                    return
+                
+                dlg = ui.dialog()
+                with dlg, ui.card().classes('w-[90vw] max-w-md p-6 rounded-2xl'):
+                    ui.label('Pindahkan ke Rutinitas').classes('text-lg font-black text-gray-800 mb-4')
+                    ui.label(f"{product.get('product_name') or product.get('nama')}").classes('text-sm text-pink-500 font-bold mb-4')
+                    
+                    routine_options = {r.id: r.name for r in routines}
+                    selected_routine = ui.select(options=routine_options, value=list(routine_options.keys())[0], label='Pilih Rutinitas').classes('w-full mb-4')
+                    hapus_checkbox = ui.checkbox('Hapus dari Wishlist setelah ditambahkan', value=True).classes('w-full mb-6 text-sm text-gray-600')
+                    
+                    def eksekusi_pindah():
+                        if not selected_routine.value:
+                            ui.notify('Pilih rutinitas target!', color='warning')
+                            return
+                        
+                        prod_id = product.get('id')
+                        with SessionLocal() as session:
+                            matched_produk = session.query(Produk).filter_by(referensi_id=prod_id).first() if prod_id else None
+                            prod_name = product.get('product_name') or product.get('nama', 'Unknown Product')
+                            
+                            if matched_produk:
+                                RoutineService.add_item_to_routine(session, selected_routine.value, product_id=matched_produk.id)
+                            else:
+                                notes = f"IMAGE:{product.get('image_url') or product.get('image', '')}"
+                                RoutineService.add_item_to_routine(session, selected_routine.value, custom_name=prod_name, notes=notes)
+                        
+                        ui.notify('Produk berhasil dipindahkan ke Rutinitas!', color='green', icon='check_circle')
+                        if hapus_checkbox.value:
+                            hapus_produk(product.get('slug'))
+                        dlg.close()
+                        
+                    with ui.row().classes('w-full justify-end gap-3'):
+                        ui.button('Batal', on_click=dlg.close).props('flat text-gray-500 hover:bg-gray-100').classes('rounded-xl')
+                        ui.button('Simpan', on_click=eksekusi_pindah).classes('bg-gradient-to-r from-pink-500 to-rose-400 text-white font-bold rounded-xl shadow-sm px-6 hover:scale-105 transition-transform')
+                dlg.open()
+                
             # Inisialisasi list pilihan bandingkan di state
             if 'wishlist_compare_selections' not in state.__dict__:
                 state.__dict__['wishlist_compare_selections'] = []
@@ -484,6 +252,7 @@ def show_page():
                     'text-xs font-bold text-gray-400 tracking-widest mt-4 mb-2 uppercase'
                 )
             # Poin 5: EMPTY STATE YANG LEBIH MENARIK DENGAN SVG
+            # Poin 5: EMPTY STATE YANG LEBIH MENARIK DENGAN SVG
             if not wishlist_products:
                 with ui.column().classes('w-full items-center justify-center py-20 gap-4'):
                     # SVG Heart Broken / Empty Box
@@ -492,11 +261,14 @@ def show_page():
                             <path stroke-linecap="round" stroke-linejoin="round" d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12z" />
                         </svg>
                     ''')
-                    ui.label("Wishlist masih kosong").classes('text-2xl font-extrabold text-gray-800 mt-2')
-                    ui.label("Simpan produk incaranmu di sini agar tidak lupa!").classes('text-gray-500 text-center max-w-sm font-medium')
-                    ui.button('Eksplorasi Produk', on_click=lambda: ui.navigate.to('/')).classes(
-                        'mt-6 bg-gradient-to-r from-pink-500 to-rose-400 text-white rounded-2xl px-8 py-3 shadow-[0_8px_20px_rgba(244,63,94,0.3)] hover:scale-105 transition-transform duration-300 font-bold'
-                    ).props('no-caps')
+                    if not raw_wishlist:
+                        ui.label("Wishlist masih kosong").classes('text-2xl font-extrabold text-gray-800 mt-2')
+                        ui.label("Simpan produk incaranmu di sini agar tidak lupa!").classes('text-gray-500 text-center max-w-sm font-medium')
+                        ui.button('Eksplorasi Produk', on_click=lambda: ui.navigate.to('/search')).classes(
+                            'mt-6 bg-gradient-to-r from-pink-500 to-rose-400 text-white rounded-2xl px-8 py-3 shadow-[0_8px_20px_rgba(244,63,94,0.3)] hover:scale-105 transition-transform duration-300 font-bold'
+                        ).props('no-caps')
+                    else:
+                        ui.label(f"Tidak ada produk di kategori {active_cat}").classes('text-2xl font-extrabold text-gray-800 mt-2')
             # LIST PRODUK
             with ui.grid(columns=1).classes('w-full gap-4'):
                 for product in wishlist_products:
@@ -550,7 +322,7 @@ def show_page():
                             # KANAN
                             with ui.row().classes('items-center gap-2 flex-shrink-0'):
                                 ui.button(
-                                    'Detail 🔬',
+                                    'Bandingkan Harga Marketplace',
                                     on_click=lambda p=product: buka_modal_detail(p)
                                 ).props('no-caps').classes(
                                     'bg-gradient-to-r from-pink-500 to-rose-400 text-white rounded-xl px-4 py-2 shadow-sm font-bold hover:scale-105 transition-all text-xs'
@@ -559,24 +331,25 @@ def show_page():
                                 is_selected = any(x.get('slug') == product.get('slug') for x in state.__dict__.get('wishlist_compare_selections', []))
                                 if is_selected:
                                     ui.button(
-                                        'Terpilih ⚔️',
+                                        'Terpilih',
                                         on_click=lambda p=product: toggle_compare_selection(p)
                                     ).props('no-caps').classes(
                                         'bg-gradient-to-r from-green-500 to-emerald-600 text-white rounded-xl px-4 py-2 shadow-sm font-bold hover:scale-105 transition-all text-xs'
                                     )
                                 else:
                                     ui.button(
-                                        'Bandingkan ⚔️',
+                                        'Bandingkan',
                                         on_click=lambda p=product: toggle_compare_selection(p)
                                     ).props('outline no-caps').classes(
                                         'text-blue-500 border-blue-200 hover:bg-blue-50 rounded-xl px-4 py-2 font-bold transition-all text-xs'
                                     )
+                                
                                 ui.button(
-                                    'Hapus',
+                                    icon='delete',
                                     on_click=lambda p=product: hapus_produk(p.get('slug'))
-                                ).props('outline no-caps').classes(
-                                    'text-pink-500 border-pink-200 rounded-xl px-4 py-2 hover:bg-pink-50 font-bold transition-colors text-xs'
-                                )
+                                ).props('flat round size=sm').classes(
+                                    'text-red-500 hover:bg-red-50 transition-colors'
+                                ).tooltip('Hapus dari Wishlist')
             # FLOATING COMPARE DOCK
             selections = state.__dict__.get('wishlist_compare_selections', [])
             if len(selections) >= 2:

@@ -4,6 +4,17 @@ __pycache__/
 venv/
 *.db
 *.log
+# *.md (SENGAJA DIHAPUS AGAR FILE PRESENTASI BISA MASUK GITHUB)
 data/db/
 data/logs/
 .env
+# Data cache scraping & temporary folders
+data/products_sociolla_*.json
+data/scraped_results/scrape_*.json
+data/raw/
+Hasil_shopee_claude/
+
+# PyInstaller & Executable builds
+build/
+dist/
+*.spec

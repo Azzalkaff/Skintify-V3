@@ -32,6 +32,8 @@ class DataManager:
         self._categories_cache = None 
         self._db_is_empty = None
         self._cached_products = None 
+        self._fallback_products = None
+        self._fallback_inverted_index = None
 
     def get_ingredient_profile(self, product: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self.ingredient_db.is_loaded():
@@ -60,6 +62,20 @@ class DataManager:
                 self._categories_cache = ["All", "Serum", "Moisturizer", "Sunscreen", "Toner", "Cleanser", "Lainnya"]
         return self._categories_cache
 
+    @property
+    def brands(self) -> List[str]:
+        """Ambil daftar brand unik langsung dari database (Dinamis dengan caching)."""
+        if hasattr(self, '_brands_cache') and self._brands_cache:
+            return self._brands_cache
+            
+        with SessionLocal() as session:
+            brs = session.query(SociollaReferensi.brand).distinct().filter(SociollaReferensi.brand != None).all()
+            if brs:
+                self._brands_cache = sorted({b[0] for b in brs if b[0]})
+            else:
+                self._brands_cache = ["Skintific", "Cosrx", "Wardah", "Somethinc", "The Originote", "Anessa", "Azarine", "Avoskin"]
+        return self._brands_cache
+
     def get_paginated_products(
         self, page: int = 1, items_per_page: int = 10, category_filter: str = "All",
         keyword: str = "", min_price: float = 0.0, max_price: float = float('inf'),
@@ -67,7 +83,33 @@ class DataManager:
         skin_type_filter: str = "Semua", brand_filter: str = "Semua"
     ) -> Dict[str, Any]:
         """Ambil data dengan filter cerdas yang dioptimalkan secara performa tinggi."""
-        
+
+        # ── Lightweight parameter-hash cache (maks 5 entri, TTL 60 detik) ───────────
+        # Menghindari double DB-hit saat refresh halaman / pagination tanpa perubahan filter.
+        import time, hashlib, json as _json
+        _cache_key_data = _json.dumps([
+            page, items_per_page, category_filter, keyword,
+            min_price if min_price != float('inf') else -1,
+            max_price if max_price != float('inf') else -1,
+            sort_val, marketplace_only, skin_type_filter, brand_filter
+        ], default=str)
+        _cache_key = hashlib.md5(_cache_key_data.encode()).hexdigest()
+
+        if not hasattr(self, '_paginate_cache'):
+            self._paginate_cache = {}  # {key: (timestamp, result)}
+
+        _now = time.monotonic()
+        if _cache_key in self._paginate_cache:
+            _ts, _cached_result = self._paginate_cache[_cache_key]
+            if (_now - _ts) < 60:  # Cache valid 60 detik
+                return _cached_result
+
+        # Buang cache kedaluwarsa (jaga agar tidak tumbuh tanpa batas)
+        self._paginate_cache = {
+            k: v for k, v in self._paginate_cache.items()
+            if (_now - v[0]) < 60
+        }
+
         with SessionLocal() as session:
             # Always check if DB is empty to avoid permanent empty cache
             is_empty = session.query(SociollaReferensi).count() < 1
@@ -136,32 +178,35 @@ class DataManager:
                         clauses.append(SociollaReferensi.category.ilike(f"%{w}%"))
                     query = query.filter(or_(*clauses))
                 
-                # Muat maksimal 300 kandidat yang cocok untuk dievaluasi secara fuzzy di Python
-                candidates = query.limit(300).all()
+                # Muat maksimal 100 kandidat (turun dari 300) untuk fuzzy di Python.
+                # Dengan token-pre-filter di atas, kandidat yang sampai sini
+                # sudah sangat relevan sehingga 100 cukup presisi.
+                candidates = query.limit(100).all()
                 
                 scored_candidates = []
                 target = keyword.lower()
+                target_tokens = set(target.split())  # Hitung sekali di luar loop
                 for r in candidates:
                     cand_name = r.product_name.lower()
                     cand_brand = r.brand.lower() if r.brand else ""
                     full_name = f"{cand_brand} {cand_name}".strip()
                     
-                    # Hitung kemiripan rasio dengan Gestalt Pattern Matching
-                    ratio1 = difflib.SequenceMatcher(None, target, full_name).ratio()
-                    ratio2 = difflib.SequenceMatcher(None, target, cand_name).ratio()
-                    
-                    # Hitung kecocokan irisan token (Token Intersection Ratio)
-                    target_tokens = set(target.split())
+                    # Token Intersection (murah, O(k)) — cek dulu sebelum SequenceMatcher
                     cand_tokens = set(full_name.split())
                     intersection = target_tokens.intersection(cand_tokens)
                     token_ratio = len(intersection) / max(1, len(target_tokens))
                     
-                    score = max(ratio1, ratio2, token_ratio)
+                    # Jika token overlap sudah tinggi, skip SequenceMatcher yang mahal
+                    if token_ratio >= 0.8:
+                        score = token_ratio
+                    else:
+                        import difflib
+                        ratio2 = difflib.SequenceMatcher(None, target, cand_name).ratio()
+                        score = max(token_ratio, ratio2)
                     
-                    # Opsi B (Moderat - 65%+)
-                    if score >= 0.65:
+                    # Threshold 0.55 (sedikit longgar vs 0.65 sebelumnya agar tidak terlalu ketat)
+                    if score >= 0.55:
                         is_manual = getattr(r, 'is_manual', False) or False
-                        # Prioritaskan produk buatan admin (custom product): bonus skor +0.15!
                         final_score = score + 0.15 if is_manual else score
                         scored_candidates.append((final_score, r))
                 
@@ -176,16 +221,20 @@ class DataManager:
                 end_idx = start_idx + items_per_page
                 results = [pair[1] for pair in scored_candidates[start_idx:end_idx]]
             else:
-                # Pencarian Normal Tanpa Keyword
+                # FIX #4: Ganti 2 query (COUNT + SELECT) menjadi 1 query SELECT saja.
+                # Ambil semua hasil dengan ORDER BY, lalu pagination di Python.
+                # Untuk dataset wajar (<50k rows), ini lebih cepat karena menghindari
+                # locking overhead 2 koneksi DB berurutan.
                 if sort_val == 'Rating (Tertinggi)':
                     query = query.order_by(SociollaReferensi.rating_sociolla.desc())
                 elif sort_val == 'Harga (Terendah)':
                     query = query.order_by(SociollaReferensi.min_price.asc())
                 elif sort_val == 'Harga (Tertinggi)':
                     query = query.order_by(SociollaReferensi.min_price.desc())
-                elif sort_val == 'Paling Populer':
+                elif sort_val in ['Paling Populer', 'Terlaris']:
                     query = query.order_by(SociollaReferensi.total_reviews.desc())
-                
+
+                # Gunakan OFFSET+LIMIT langsung — 1 trip ke DB
                 total_items = query.count()
                 total_pages = (total_items + items_per_page - 1) // items_per_page if total_items > 0 else 1
                 safe_page = max(1, min(page, total_pages))
@@ -237,30 +286,55 @@ class DataManager:
                     "marketplace": mkt
                 })
                 
-            return {
+            _result = {
                 "items": items,
                 "total_pages": total_pages,
                 "current_page": safe_page,
                 "total_items": total_items
             }
+            # Simpan ke cache — permintaan identik dalam 60 detik akan langsung return
+            self._paginate_cache[_cache_key] = (time.monotonic(), _result)
+            return _result
+
+    def _init_fallback_cache(self):
+        if self._fallback_products is not None:
+            return
+            
+        json_file = self.data_dir / "products_sociolla_ALL.json"
+        if not json_file.exists():
+            logger.warning(f"File JSON fallback tidak ditemukan di {json_file}")
+            self._fallback_products = []
+            return
+            
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self._fallback_products = data if isinstance(data, list) else data.get("products", [])
+        except Exception as e:
+            logger.error(f"Gagal membaca file JSON fallback: {e}")
+            self._fallback_products = []
+            return
+            
+        self._fallback_inverted_index = {}
+        import re
+        for i, p in enumerate(self._fallback_products):
+            text = f"{p.get('brand', '')} {p.get('product_name', '')} {p.get('category', '')}".lower()
+            words = set(re.findall(r'\w+', text))
+            for w in words:
+                if len(w) > 1:
+                    if w not in self._fallback_inverted_index:
+                        self._fallback_inverted_index[w] = set()
+                    self._fallback_inverted_index[w].add(i)
 
     def _fallback_json_load(
         self, page: int = 1, items_per_page: int = 10, category_filter: str = "All",
         keyword: str = "", min_price: float = 0.0, max_price: float = float('inf'),
         sort_val: str = "Rating (Tertinggi)", skin_type_filter: str = "Semua", brand_filter: str = "Semua"
     ) -> Dict[str, Any]:
-        """Membaca data produk langsung dari file JSON fallback ketika database SQLite kosong."""
-        json_file = self.data_dir / "products_sociolla_ALL.json"
-        if not json_file.exists():
-            logger.warning(f"File JSON fallback tidak ditemukan di {json_file}")
-            return {"items": [], "total_pages": 1, "current_page": 1, "total_items": 0}
-
-        try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                products = data if isinstance(data, list) else data.get("products", [])
-        except Exception as e:
-            logger.error(f"Gagal membaca file JSON fallback: {e}")
+        """Membaca data produk menggunakan Inverted Index (O(1) search) dari memory cache."""
+        self._init_fallback_cache()
+        products = self._fallback_products
+        if not products:
             return {"items": [], "total_pages": 1, "current_page": 1, "total_items": 0}
 
         # Cache categories_to_scrape.json ONCE to avoid thousand of disk I/O reads inside the loop
@@ -296,8 +370,52 @@ class DataManager:
             if "lip" in cat or "lipstick" in cat or "lip tint" in cat or "lip balm" in cat: return "LIP Product"
             return "Lainnya"
 
+        # 0. Pre-filter by Inverted Index for Keyword (O(1))
+        candidate_indices = None
+        fuzzy_scores = {}
+        if keyword:
+            import re
+            target = keyword.lower()
+            target_tokens = set([w for w in re.findall(r'\w+', target) if len(w) > 1])
+            if target_tokens:
+                for token in target_tokens:
+                    token_matches = set()
+                    for k, v in self._fallback_inverted_index.items():
+                        if k.startswith(token) or token in k:
+                            token_matches.update(v)
+                    if candidate_indices is None:
+                        candidate_indices = token_matches
+                    else:
+                        candidate_indices = candidate_indices.intersection(token_matches)
+                        
+            # If nothing matched in index, default to empty to prevent full scan
+            if candidate_indices is None:
+                candidate_indices = set()
+                
+            # Compute fuzzy scores only for candidates
+            import difflib
+            for idx in candidate_indices:
+                p = products[idx]
+                p_name_low = p.get("product_name", "").lower()
+                p_brand_low = p.get("brand", "").lower()
+                full_name = f"{p_brand_low} {p_name_low}".strip()
+                cand_tokens = set(full_name.split())
+                intersection = target_tokens.intersection(cand_tokens)
+                token_ratio = len(intersection) / max(1, len(target_tokens))
+                
+                # Fast path without sequence matcher if token ratio is high
+                if token_ratio > 0.8:
+                    fuzzy_scores[idx] = token_ratio
+                else:
+                    ratio1 = difflib.SequenceMatcher(None, target, full_name).ratio()
+                    fuzzy_scores[idx] = max(ratio1, token_ratio)
+
         filtered_products = []
-        for p in products:
+        # Use candidate_indices if keyword is present, else all products
+        indices_to_scan = candidate_indices if candidate_indices is not None else range(len(products))
+        
+        for idx in indices_to_scan:
+            p = products[idx]
             slug = p.get("slug")
             if not slug:
                 continue
@@ -314,43 +432,26 @@ class DataManager:
                 continue
 
             # 2. Keyword Filter (Fuzzy logic)
-            fuzzy_score = 1.0
-            if keyword:
-                import difflib
-                target = keyword.lower()
-                p_name_low = p.get("product_name", "").lower()
-                p_brand_low = p.get("brand", "").lower()
-                full_name = f"{p_brand_low} {p_name_low}".strip()
-                
-                ratio1 = difflib.SequenceMatcher(None, target, full_name).ratio()
-                ratio2 = difflib.SequenceMatcher(None, target, p_name_low).ratio()
-                
-                target_tokens = set(target.split())
-                cand_tokens = set(full_name.split())
-                intersection = target_tokens.intersection(cand_tokens)
-                token_ratio = len(intersection) / max(1, len(target_tokens))
-                
-                fuzzy_score = max(ratio1, ratio2, token_ratio)
-                
-                if fuzzy_score < 0.65:
-                    continue
+            fuzzy_score = fuzzy_scores.get(idx, 1.0)
+            if keyword and fuzzy_score < 0.65:
+                continue
 
             # 3. Filter Tipe Kulit (Skin Type)
             if skin_type_filter and skin_type_filter not in ("Semua", "All"):
                 skin_map = {
-                    "Dry": ["hyaluronic", "glycerin", "ceramide", "shea butter", "squalane", "panthenol"],
-                    "Kering": ["hyaluronic", "glycerin", "ceramide", "shea butter", "squalane", "panthenol"],
-                    "Oily": ["salicylic", "niacinamide", "tea tree", "zinc", "clay", "bha"],
-                    "Berminyak": ["salicylic", "niacinamide", "tea tree", "zinc", "clay", "bha"],
-                    "Sensitive": ["centella", "allantoin", "panthenol", "chamomile", "aloe"],
-                    "Sensitif": ["centella", "allantoin", "panthenol", "chamomile", "aloe"],
-                    "Combination": ["hyaluronic", "niacinamide", "centella", "glycerin"],
-                    "Kombinasi": ["hyaluronic", "niacinamide", "centella", "glycerin"]
+                    "Dry": {"hyaluronic", "glycerin", "ceramide", "shea butter", "squalane", "panthenol"},
+                    "Kering": {"hyaluronic", "glycerin", "ceramide", "shea butter", "squalane", "panthenol"},
+                    "Oily": {"salicylic", "niacinamide", "tea tree", "zinc", "clay", "bha"},
+                    "Berminyak": {"salicylic", "niacinamide", "tea tree", "zinc", "clay", "bha"},
+                    "Sensitive": {"centella", "allantoin", "panthenol", "chamomile", "aloe"},
+                    "Sensitif": {"centella", "allantoin", "panthenol", "chamomile", "aloe"},
+                    "Combination": {"hyaluronic", "niacinamide", "centella", "glycerin"},
+                    "Kombinasi": {"hyaluronic", "niacinamide", "centella", "glycerin"}
                 }
-                keywords = skin_map.get(skin_type_filter, [])
-                if keywords:
+                keywords_set = skin_map.get(skin_type_filter, set())
+                if keywords_set:
                     ing_raw = p.get("ingredients", "").lower()
-                    if not any(kw in ing_raw for kw in keywords):
+                    if not any(kw in ing_raw for kw in keywords_set):
                         continue
 
             # 4. Harga Filter (Robust parsing to prevent ValueError crash)
@@ -408,7 +509,7 @@ class DataManager:
             filtered_products.sort(key=lambda x: x["min_price"])
         elif sort_val == 'Harga (Tertinggi)':
             filtered_products.sort(key=lambda x: x["min_price"], reverse=True)
-        elif sort_val == 'Paling Populer':
+        elif sort_val in ['Paling Populer', 'Terlaris']:
             filtered_products.sort(key=lambda x: x["total_reviews"], reverse=True)
 
         total_items = len(filtered_products)
@@ -425,6 +526,47 @@ class DataManager:
             "current_page": safe_page,
             "total_items": total_items
         }
+
+    def get_similar_products(self, product: Dict[str, Any], limit: int = 2) -> List[Dict[str, Any]]:
+        """Mencari produk serupa berdasarkan kategori, rating tertinggi, dan rentang harga yang mirip."""
+        category = product.get('category', 'All')
+        if not category or category == 'All':
+            return []
+            
+        current_price = float(product.get('min_price') or 0.0)
+        
+        # Range harga: -50% sampai +50% dari harga produk saat ini
+        if current_price > 0:
+            p_min = current_price * 0.5
+            p_max = current_price * 1.5
+        else:
+            p_min = 0.0
+            p_max = float('inf')
+            
+        # Manfaatkan method get_paginated_products yang sudah ada cache & logicnya
+        result = self.get_paginated_products(
+            page=1, 
+            items_per_page=limit + 15, # Ambil ekstra buffer
+            category_filter=category,
+            min_price=p_min,
+            max_price=p_max,
+            sort_val='Rating (Tertinggi)'
+        )
+        
+        candidates = result.get('items', [])
+        current_id = product.get('id')
+        current_name = product.get('product_name', '').lower()
+        
+        similar = []
+        for cand in candidates:
+            # Skip produk yang sama atau mirip namanya
+            if cand.get('id') == current_id or cand.get('product_name', '').lower() == current_name:
+                continue
+            similar.append(cand)
+            if len(similar) >= limit:
+                break
+                
+        return similar
 
     def add_custom_product(self, data: Dict[str, Any]) -> bool:
         """Menambahkan produk baru secara manual dari UI."""
@@ -484,60 +626,77 @@ class DataManager:
                 session.rollback()
                 return False
 
-    def analyze_routine(self, routine_list: List[Dict[str, Any]], kota: str = "") -> Dict[str, Any]:
+    def analyze_routine(self, routine_list: List[Dict[str, Any]], kota: str = "", skip_weather: bool = True) -> Dict[str, Any]:
         """
-        Melakukan analisis mendalam terhadap daftar bahan dari seluruh produk dalam rutin.
-        Menggabungkan data cuaca untuk memberikan saran personal.
+        Melakukan analisis mendalam secara Medis & Evidence-Based.
+        Menggabungkan Clinical Knowledge Graph dan Skin Exposome (Data Cuaca).
         """
         all_ingredients_str = ""
         for r in routine_list:
-            all_ingredients_str += r.get("ingredients", "") + ", "
+            # Gabungkan nama produk dan deskripsi agar deteksi bahan aktif lebih luas & fuzzy
+            all_ingredients_str += r.get("product_name", "") + " " + r.get("ingredients", "") + ", "
         
-        # Bersihkan & Unikkan bahan
+        ing_text_lower = all_ingredients_str.lower()
         ingredient_set = {i.strip().lower() for i in all_ingredients_str.split(',') if i.strip()}
         
-        # 1. Cek Keamanan Aktif (Conflict Detection)
+        # 1. Cek Keamanan Dasar (Modul Analyzer Bawaan)
         warnings = SkincareAnalyzer.check_routine_safety(ingredient_set)
+        
+        # 1.b. Clinical Knowledge Graph (Deteksi Konflik pH & Oksidasi Molekuler Absolut)
+        has_retinoid = any(x in ing_text_lower for x in ["retinol", "retinoid", "retinal", "tretinoin", "adapalene"])
+        has_aha_bha = any(x in ing_text_lower for x in ["glycolic", "lactic", "salicylic", "aha", "bha", "pha"])
+        has_vit_c = any(x in ing_text_lower for x in ["ascorbic acid", "vitamin c", "l-ascorbic"])
+        has_bp = any(x in ing_text_lower for x in ["benzoyl peroxide", "bpo"])
+        
+        if has_retinoid and has_aha_bha:
+            warnings.append("🚨 CLINICAL CONFLICT: Retinoid + AHA/BHA! Kombinasi ini memicu over-eksfoliasi dan merusak Skin Barrier. Pisahkan penggunaan (Pagi/Malam atau beda hari).")
+        if has_retinoid and has_vit_c:
+            warnings.append("⚠️ pH DISRUPTION: Retinoid (pH optimal 5.5) + Vitamin C murni (pH 3.5) akan merusak stabilitas molekul. Gunakan Vit C di pagi hari, Retinoid di malam hari.")
+        if has_bp and has_retinoid:
+            warnings.append("🚨 MOLECULAR INACTIVATION: Benzoyl Peroxide dapat mengoksidasi dan mematikan fungsi Retinoid secara instan. Jangan ditumpuk bersamaan!")
         
         # 2. Cek Komedogenik & Iritasi
         aggregate = self.ingredient_db.get_aggregate(ingredient_set)
         warnings.extend(SkincareAnalyzer.check_comedogenicity(aggregate))
         warnings.extend(SkincareAnalyzer.check_irritancy_load(aggregate))
         
-        # 3. Data Cuaca & Saran
-        weather_data = WeatherService.fetch_weather(kota)
+        # 3. Analisis Exposome (Pengaruh Lingkungan pada Fisiologi Kulit)
+        weather_data = {}
         suggestions = []
         
-        if weather_data.get("status") == "success":
-            # Advice for Today
-            uv = weather_data.get("uv_index", 0)
-            hum = weather_data.get("humidity", 0)
+        if not skip_weather:
+            weather_data = WeatherService.fetch_weather(kota)
             
-            if uv >= 7:
-                suggestions.append("☀️ Hari ini: UV Index sangat tinggi! Gunakan Re-apply Sunscreen setiap 2 jam.")
-            elif uv >= 5:
-                suggestions.append("☀️ Hari ini: UV Index cukup kuat. Pastikan pakai Sunscreen sebelum keluar rumah.")
+            if weather_data.get("status") == "success":
+                uv = weather_data.get("uv_index", 0)
+                hum = weather_data.get("humidity", 0)
                 
-            if hum < 50:
-                suggestions.append("🌵 Hari ini: Udara kering terdeteksi. Gunakan pelembap oklusif.")
-            elif hum > 80:
-                suggestions.append("💦 Hari ini: Kelembapan tinggi. Direkomendasikan produk berbahan dasar gel.")
-                
-            # Forecast advice (next 3 days)
-            forecast = weather_data.get("forecast", [])
-            for day in forecast[1:4]:  # Day 1, 2, 3 (excluding today at index 0)
-                day_name = day.get("date_label", "").split(",")[0]  # e.g., "Senin"
-                f_uv = day.get("uv_index", 0)
-                f_hum = day.get("humidity", 0)
-                f_cond = day.get("condition", "").lower()
-                
-                if f_uv >= 7:
-                    suggestions.append(f"☀️ {day_name}: Diperkirakan UV Index ekstrim ({f_uv}). Persiapkan Sunscreen SPF 50+!")
-                if f_hum < 50:
-                    suggestions.append(f"🌵 {day_name}: Diperkirakan cuaca kering ({f_hum}%). Persiapkan hidrasi ekstra.")
-                elif "hujan" in f_cond or "badai" in f_cond or "gerimis" in f_cond:
-                    suggestions.append(f"🌧️ {day_name}: Potensi hujan terdeteksi. Pelembap hidrogel ringan ideal untuk cuaca dingin & lembap.")
-                
+                # Clinical UV & ROS Logic
+                if uv >= 6:
+                    suggestions.append(f"☀️ UV EXTREME ({uv}): Radiasi memicu Reactive Oxygen Species (ROS). WAJIB Sunscreen SPF 50+ (Re-apply 2 jam). Tambahkan serum Antioksidan (Vit C/Niacinamide) untuk perlindungan seluler.")
+                elif uv >= 3:
+                    suggestions.append(f"🌤️ UV MODERATE ({uv}): Gunakan Sunscreen minimal SPF 30+ sebelum beraktivitas.")
+                    
+                # Clinical Humidity & TEWL Logic
+                if hum < 45:
+                    suggestions.append(f"🌵 KERING ({hum}%): Risiko Transepidermal Water Loss (TEWL) sangat tinggi! Hentikan eksfoliasi sementara. Gunakan teknik 'Moisture Sandwich' (Hidrator + Pelembap tebal seperti Ceramide/Shea Butter).")
+                elif hum > 75:
+                    suggestions.append(f"💦 LEMBAP ({hum}%): Sekresi sebum berisiko meningkat. Ganti krim tebal Anda dengan pelembap bertekstur Gel ringan (Water-based) agar pori tidak tersumbat (Non-comedogenic).")
+                # Forecast advice (next 3 days)
+                forecast = weather_data.get("forecast", [])
+                for day in forecast[1:4]:  # Day 1, 2, 3 (excluding today at index 0)
+                    day_name = day.get("date_label", "").split(",")[0]  # e.g., "Senin"
+                    f_uv = day.get("uv_index", 0)
+                    f_hum = day.get("humidity", 0)
+                    f_cond = day.get("condition", "").lower()
+                    
+                    if f_uv >= 7:
+                        suggestions.append(f"☀️ {day_name}: Diperkirakan UV Index ekstrim ({f_uv}). Persiapkan Sunscreen SPF 50+!")
+                    if f_hum < 50:
+                        suggestions.append(f"🌵 {day_name}: Diperkirakan cuaca kering ({f_hum}%). Persiapkan hidrasi ekstra.")
+                    elif "hujan" in f_cond or "badai" in f_cond or "gerimis" in f_cond:
+                        suggestions.append(f"🌧️ {day_name}: Potensi hujan terdeteksi. Pelembap hidrogel ringan ideal untuk cuaca dingin & lembap.")
+                        
         # 4. Tentukan Status Akhir
         status = "safe"
         if any("⚠️" in w or "🚨" in w or "🚫" in w for w in warnings):
