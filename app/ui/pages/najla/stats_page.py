@@ -566,7 +566,7 @@ def build_trending_list(products: List[Dict[str, Any]]):
                 ui.label('⭐')
 
                 ui.label(
-                    f'{p["rating"]:.1f}/5'
+                    f' {p["rating"]:.1f} | {p["reviews"]:,}'.replace(',', '.')
                 ).style(
                     '''
                     font-size:18px;
