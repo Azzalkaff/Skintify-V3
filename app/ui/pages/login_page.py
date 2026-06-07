@@ -103,9 +103,36 @@ def show_page():
                     ui.button('Daftar & Kirim OTP', on_click=proses_daftar) \
                         .classes('w-full btn-primary text-white rounded-xl py-3 shadow-lg')
                 
+                def login_google_native():
+                    import uuid
+                    import webbrowser
+                    import os
+                    
+                    ticket = str(uuid.uuid4())
+                    port = os.environ.get("PORT", 8081)
+                    url = f"http://127.0.0.1:{port}/login/google?ticket={ticket}"
+                    
+                    webbrowser.open(url)
+                    ui.notify("Membuka browser... Silakan selesaikan login di browser utama Anda.", color='info')
+                    
+                    # Polling tiket asinkron tanpa memblokir UI (Asynchronous Safety)
+                    async def poll_auth():
+                        if ticket in AuthManager.PENDING_OAUTH_LOGINS:
+                            polling_timer.deactivate()
+                            user_data = AuthManager.PENDING_OAUTH_LOGINS.pop(ticket)
+                            AuthManager.set_user_session(user_data)
+                            
+                            ui.notify("Otorisasi SSO Berhasil! Mengalihkan...", color='positive')
+                            if app.storage.user.get('onboarding_completed'):
+                                ui.navigate.to('/')
+                            else:
+                                ui.navigate.to('/onboarding')
+                                
+                    polling_timer = ui.timer(1.0, poll_auth)
+
                 # --- GOOGLE OAUTH BUTTON ---
                 ui.separator().classes('my-4')
-                ui.button('Masuk dengan Google', icon='login', on_click=lambda: ui.navigate.to('/login/google')) \
+                ui.button('Masuk dengan Google', icon='login', on_click=login_google_native) \
                     .props('color=white text-color=grey-8 no-caps') \
                     .classes('w-full border border-gray-300 rounded-xl py-3 shadow-sm hover:bg-gray-50 font-bold')
                 

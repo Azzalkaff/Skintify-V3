@@ -31,6 +31,37 @@ class AuthManager:
     """
 
     PENYIMPANAN_OTP: Dict[str, Any] = {}
+    PENDING_OAUTH_LOGINS: Dict[str, dict] = {}
+
+    @staticmethod
+    def set_user_session(user_data: dict):
+        """Memasukkan data pengguna ke dalam app.storage.user (Session)."""
+        app.storage.user['authenticated'] = True
+        app.storage.user['email']         = user_data.get('email')
+        app.storage.user['username']      = user_data.get('username')
+        app.storage.user['city']          = user_data.get('city', 'Jakarta')
+        app.storage.user['role']          = user_data.get('role', 'user')
+        
+        # Load Profile & Onboarding Data
+        app.storage.user['skin_type'] = user_data.get('skin_type')
+        app.storage.user['onboarding_completed'] = bool(user_data.get('onboarding_completed', 0))
+        app.storage.user['has_seen_about'] = bool(user_data.get('has_seen_about', 0))
+        
+        import json
+        def _parse_json_field(field_name, default=[]):
+            val = user_data.get(field_name)
+            if not val:
+                return default
+            try:
+                return json.loads(val)
+            except Exception:
+                return default
+
+        app.storage.user['wishlist'] = BasisData.ambil_wishlist(user_data.get('email'))
+        app.storage.user['avoid_ingredients'] = _parse_json_field('avoid_ingredients')
+        app.storage.user['skin_issues'] = _parse_json_field('skin_issues')
+        app.storage.user['skincare_goals'] = _parse_json_field('skincare_goals')
+        app.storage.user['lifestyle'] = _parse_json_field('lifestyle')
 
     @staticmethod
     def is_authenticated() -> bool:
@@ -56,33 +87,7 @@ class AuthManager:
         if BasisData.cek_identifier_terdaftar(identifier):
             if BasisData.verifikasi_login(identifier, password):
                 user_data = BasisData.get_pengguna(identifier)
-                app.storage.user['authenticated'] = True
-                app.storage.user['email']         = user_data.get('email')
-                app.storage.user['username']      = user_data.get('username')
-                app.storage.user['city']          = user_data.get('city', 'Jakarta')
-                app.storage.user['role']          = user_data.get('role', 'user')
-                
-                # Load Profile & Onboarding Data
-                app.storage.user['skin_type'] = user_data.get('skin_type')
-                app.storage.user['onboarding_completed'] = bool(user_data.get('onboarding_completed', 0))
-                app.storage.user['has_seen_about'] = bool(user_data.get('has_seen_about', 0))
-                
-                import json
-                def _parse_json_field(field_name, default=[]):
-                    val = user_data.get(field_name)
-                    if not val:
-                        return default
-                    try:
-                        return json.loads(val)
-                    except Exception:
-                        return default
-
-                app.storage.user['wishlist'] = BasisData.ambil_wishlist(user_data.get('email'))
-                app.storage.user['avoid_ingredients'] = _parse_json_field('avoid_ingredients')
-                app.storage.user['skin_issues'] = _parse_json_field('skin_issues')
-                app.storage.user['skincare_goals'] = _parse_json_field('skincare_goals')
-                app.storage.user['lifestyle'] = _parse_json_field('lifestyle')
-                
+                AuthManager.set_user_session(user_data)
                     
                 return True, "Login berhasil!"
             return False, "Password salah!"
@@ -182,10 +187,12 @@ if os.getenv("GOOGLE_CLIENT_ID"):
         client_kwargs={'scope': 'openid email profile'}
     )
 
-async def login_google_route(request: Request):
+async def login_google_route(request: Request, ticket: str = None):
     """FastAPI route handler untuk melempar pengguna ke Google."""
     if not os.getenv("GOOGLE_CLIENT_ID"):
         return RedirectResponse('/login?error=Google_Not_Configured')
+    if ticket:
+        request.session['auth_ticket'] = ticket
     redirect_uri = request.url_for('auth_google_callback_route')
     return await oauth.google.authorize_redirect(request, str(redirect_uri))
 
@@ -208,35 +215,41 @@ async def auth_google_callback_route(request: Request):
             
         user_data = BasisData.get_pengguna(email)
         
-        # Karena kita berada di FastAPI raw route, kita mengakses app.storage.user dari nicegui app
-        # nicegui.app.storage.user is bound to the request via session cookie
-        app.storage.user['authenticated'] = True
-        app.storage.user['email']         = user_data.get('email')
-        app.storage.user['username']      = user_data.get('username')
-        app.storage.user['role']          = user_data.get('role', 'user')
-        app.storage.user['skin_type'] = user_data.get('skin_type')
-        app.storage.user['onboarding_completed'] = bool(user_data.get('onboarding_completed', 0))
-        
-        import json
-        def _parse_json_field(field_name, default=[]):
-            val = user_data.get(field_name)
-            if not val:
-                return default
-            try:
-                return json.loads(val)
-            except Exception:
-                return default
-
-        app.storage.user['wishlist'] = BasisData.ambil_wishlist(email)
-        app.storage.user['avoid_ingredients'] = _parse_json_field('avoid_ingredients')
-        app.storage.user['skin_issues'] = _parse_json_field('skin_issues')
-        app.storage.user['skincare_goals'] = _parse_json_field('skincare_goals')
-        app.storage.user['lifestyle'] = _parse_json_field('lifestyle')
-        
-        if app.storage.user.get('onboarding_completed'):
-            return RedirectResponse('/')
+        ticket = request.session.get('auth_ticket')
+        if ticket:
+            # Login dari PyWebView Desktop (Cross-Session)
+            AuthManager.PENDING_OAUTH_LOGINS[ticket] = user_data
+            
+            from fastapi.responses import HTMLResponse
+            return HTMLResponse("""
+            <html>
+            <head>
+                <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #fdfbf7; margin: 0; }
+                    .card { background: white; padding: 40px; border-radius: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); text-align: center; }
+                    h2 { color: #2d3748; margin-bottom: 10px; }
+                    p { color: #718096; margin-bottom: 20px; }
+                    .success-icon { font-size: 48px; margin-bottom: 20px; }
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <div class="success-icon">✅</div>
+                    <h2>Login Berhasil!</h2>
+                    <p>Silakan tutup tab browser ini dan kembali ke aplikasi desktop Skintify Anda.</p>
+                </div>
+                <script>setTimeout(() => window.close(), 3000);</script>
+            </body>
+            </html>
+            """)
         else:
-            return RedirectResponse('/onboarding')
+            # Login Web biasa
+            AuthManager.set_user_session(user_data)
+            
+            if app.storage.user.get('onboarding_completed'):
+                return RedirectResponse('/')
+            else:
+                return RedirectResponse('/onboarding')
             
     except Exception as e:
         return RedirectResponse(f'/login?error={str(e)}')
