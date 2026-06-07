@@ -3,193 +3,327 @@ from app.context import data_mgr, state
 from app.ui.components import UIComponents
 from app.auth.auth import AuthManager
 from app.database.engine import SessionLocal
-from app.database.models import SociollaReferensi, Routine, RoutineItem
+from app.database.models import SociollaReferensi
 from collections import Counter
 from typing import List, Dict, Any
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt  # type: ignore[import-untyped]
-import matplotlib.patches as mpatches  # type: ignore[import-untyped]
-import io
+
 import base64
 from functools import lru_cache
 
-# ── Warna tema konsisten ──────────────────────────────────────────
-PINK_PRIMARY   = '#EC4899'
-PINK_LIGHT     = '#F9A8D4'
-PINK_SOFT      = '#FCE7F3'
-PINK_DARK      = '#9D174D'
-PINK_SHADES    = ['#F472B6', '#EC4899', '#DB2777', '#BE185D', '#9D174D',
-                  '#831843', '#500724', '#FDA4AF', '#FB7185']
 
+# ── WARNA ──────────────────────────────────────────
+PINK_PRIMARY = '#EC4899'
+PINK_LIGHT = '#F9A8D4'
+PINK_SOFT = '#FCE7F3'
+ACCENT_TEAL = '#06B6D4'
+ACCENT_INDIGO = '#6366F1'
+CARD_SHADOW = 'box-shadow:0 8px 20px rgba(15,23,42,0.06); border:1px solid rgba(15,23,42,0.04);'
+CARD_BG_NEUTRAL = '#FFFFFF'
+PALETTE = ['#EC4899', '#A78BFA', '#60A5FA', '#FB923C', '#F472B6']
+HEADER_GRADIENT = 'linear-gradient(90deg, #EC4899 0%, #A78BFA 50%, #60A5FA 100%)'
+
+SKINCARE_CATEGORIES = {
+    'Cleanser', 'Toner', 'Serum', 'Moisturizer', 'Sunscreen',
+    'Mask', 'Sheet Mask', 'Lotion', 'Essence', 'Ampoule',
+    'Facial Oil', 'Mist', 'Scrub', 'Peeling', 'Treatment',
+    'Eye Cream', 'Neck Cream', 'Sleep Mask'
+}
+
+
+def is_skincare_category(category: str) -> bool:
+    if not category:
+        return False
+    normalized = str(category).strip()
+    return normalized in SKINCARE_CATEGORIES
+
+
+# ── AX STYLE ───────────────────────────────────────
 def setup_ax(ax, title: str, show_grid_x=False, show_grid_y=True):
-    """Terapkan styling modern ke axes"""
-    ax.set_title(title, fontsize=13, fontweight='bold', color='#1F2937',
-                 pad=14, loc='left')
+
+    ax.set_title(
+        title,
+        fontsize=13,
+        fontweight='bold',
+        color='#1F2937',
+        pad=14,
+        loc='left'
+    )
+
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+
     ax.spines['left'].set_color('#E5E7EB')
     ax.spines['bottom'].set_color('#E5E7EB')
+
     ax.tick_params(colors='#6B7280', labelsize=9)
+
     if show_grid_y:
-        ax.yaxis.grid(True, linestyle='--', linewidth=0.5, color='#F3F4F6', alpha=0.8)
+        ax.yaxis.grid(
+            True,
+            linestyle='--',
+            linewidth=0.5,
+            color='#F3F4F6',
+            alpha=0.8
+        )
+
         ax.set_axisbelow(True)
+
     if show_grid_x:
-        ax.xaxis.grid(True, linestyle='--', linewidth=0.5, color='#F3F4F6', alpha=0.8)
+        ax.xaxis.grid(
+            True,
+            linestyle='--',
+            linewidth=0.5,
+            color='#F3F4F6',
+            alpha=0.8
+        )
+
         ax.set_axisbelow(True)
+
     ax.set_facecolor('#FAFAFA')
 
 
-# ── Query helpers ─────────────────────────────────────────────────
-
+# ── DATA ───────────────────────────────────────────
 def get_trending_products(limit: int = 10) -> List[Dict[str, Any]]:
-    """
-    Top produk berdasarkan skor trending = total_wishlist + total_reviews.
-    Lebih meaningful daripada sort by rating saja karena mencerminkan
-    seberapa banyak orang tertarik & memberikan ulasan.
-    """
+
     with SessionLocal() as session:
-        products = session.query(SociollaReferensi).filter(
-            SociollaReferensi.is_in_stock == True
+
+        products = session.query(
+            SociollaReferensi
         ).all()
 
+        # Jika database kosong, gunakan fallback dari DataManager (JSON)
+        if not products:
+            try:
+                fallback = data_mgr.get_paginated_products(page=1, items_per_page=1000)
+                items = fallback.get('items', [])
+                products = []
+                for it in items:
+                    # Normalisasi ke objek dict yang mirip ORM
+                    products.append(type('P', (), {
+                        'product_name': it.get('product_name'),
+                        'brand': it.get('brand'),
+                        'category': it.get('category'),
+                        # map JSON average_rating -> rating_sociolla
+                        'rating_sociolla': it.get('rating') or it.get('average_rating') or 0,
+                        'total_reviews': it.get('total_reviews') or 0,
+                        # correct field: JSON uses 'total_wishlist'
+                        'total_wishlist': int(it.get('total_wishlist') or 0),
+                        'image_url': it.get('image_url') or it.get('gambar') or ''
+                    }))
+            except Exception:
+                products = []
         scored = []
+
         for p in products:
-            wishlist = p.total_wishlist  or 0
-            reviews  = p.total_reviews   or 0
-            rating   = p.rating_sociolla or 0
-            # Skor gabungan: aktivitas user (wishlist + review) x bobot rating
-            score = (wishlist + reviews) * (rating / 5.0 if rating else 0.5)
+            if not is_skincare_category(getattr(p, 'category', None)):
+                continue
+
+            wishlist = p.total_wishlist or 0
+            reviews = p.total_reviews or 0
+            rating = p.rating_sociolla or 0
+
+            score = (
+                wishlist + reviews
+            ) * (
+                rating / 5.0 if rating else 0.5
+            )
+
             scored.append({
-                'name'      : p.product_name,
-                'brand'     : p.brand or '',
-                'category'  : p.category or '',
-                'rating'    : rating,
-                'reviews'   : reviews,
-                'wishlist'  : wishlist,
-                'score'     : score,
-                'image_url' : p.image_url or '',
+                'name': p.product_name,
+                'brand': p.brand or '',
+                'category': p.category or '',
+                'rating': rating,
+                'reviews': reviews,
+                'wishlist': wishlist,
+                'score': score,
+                'image_url': p.image_url or '',
             })
 
-        scored.sort(key=lambda x: x['score'], reverse=True)
+        scored.sort(
+            key=lambda x: x['score'],
+            reverse=True
+        )
+
         return scored[:limit]
 
 
 def get_rating_distribution() -> Dict[str, int]:
-    from sqlalchemy import func, case
+
     with SessionLocal() as session:
-        results = session.query(
-            func.sum(case(((SociollaReferensi.rating_sociolla >= 4.5), 1), else_=0)),
-            func.sum(case(((SociollaReferensi.rating_sociolla >= 4.0) & (SociollaReferensi.rating_sociolla < 4.5), 1), else_=0)),
-            func.sum(case(((SociollaReferensi.rating_sociolla >= 3.5) & (SociollaReferensi.rating_sociolla < 4.0), 1), else_=0)),
-            func.sum(case(((SociollaReferensi.rating_sociolla >= 3.0) & (SociollaReferensi.rating_sociolla < 3.5), 1), else_=0)),
-            func.sum(case(((SociollaReferensi.rating_sociolla < 3.0) & (SociollaReferensi.rating_sociolla != None), 1), else_=0))
-        ).first()
-        
+
+        products = session.query(
+            SociollaReferensi
+        ).all()
+
+        # Fallback ke JSON via data_mgr jika DB kosong
+        if not products:
+            try:
+                items = data_mgr.get_paginated_products(page=1, items_per_page=1000).get('items', [])
+                # adapt items to expected shape
+                products = [type('P', (), { 'rating_sociolla': it.get('rating') or it.get('average_rating') or 0 }) for it in items]
+            except Exception:
+                products = []
         distribution = {
-            '4.5–5.0': int(results[0] or 0),
-            '4.0–4.4': int(results[1] or 0),
-            '3.5–3.9': int(results[2] or 0),
-            '3.0–3.4': int(results[3] or 0),
-            '<3.0': int(results[4] or 0)
+            '4.5–5.0': 0,
+            '4.0–4.4': 0,
+            '3.5–3.9': 0,
+            '3.0–3.4': 0,
+            '<3.0': 0
         }
+
+        for p in products:
+
+            rating = p.rating_sociolla or 0
+
+            if rating >= 4.5:
+                distribution['4.5–5.0'] += 1
+
+            elif rating >= 4.0:
+                distribution['4.0–4.4'] += 1
+
+            elif rating >= 3.5:
+                distribution['3.5–3.9'] += 1
+
+            elif rating >= 3.0:
+                distribution['3.0–3.4'] += 1
+
+            else:
+                distribution['<3.0'] += 1
+
         return distribution
 
+
 def get_top_brands(limit: int = 8) -> Dict[str, int]:
-    from sqlalchemy import func
+
     with SessionLocal() as session:
-        results = session.query(
-            SociollaReferensi.brand,
-            func.count(SociollaReferensi.brand)
-        ).filter(SociollaReferensi.brand != None)\
-         .group_by(SociollaReferensi.brand)\
-         .order_by(func.count(SociollaReferensi.brand).desc())\
-         .limit(limit).all()
-        return dict(results)
+
+        products = session.query(
+            SociollaReferensi
+        ).all()
+
+        # Fallback to data_mgr JSON when empty
+        if not products:
+            try:
+                items = data_mgr.get_paginated_products(page=1, items_per_page=1000).get('items', [])
+                products = [type('P', (), { 'brand': it.get('brand'), 'category': it.get('category') }) for it in items]
+            except Exception:
+                products = []
+        brand_counter = Counter()
+
+        for p in products:
+            if p.brand and is_skincare_category(getattr(p, 'category', None)):
+                brand_counter[p.brand] += 1
+
+        return dict(
+            brand_counter.most_common(limit)
+        )
+
 
 def get_category_distribution() -> Dict[str, int]:
-    from sqlalchemy import func
+
     with SessionLocal() as session:
-        results = session.query(
-            SociollaReferensi.category,
-            func.count(SociollaReferensi.category)
-        ).filter(SociollaReferensi.category != None)\
-         .group_by(SociollaReferensi.category)\
-         .order_by(func.count(SociollaReferensi.category).desc()).all()
-        return dict(results)
+
+        products = session.query(
+            SociollaReferensi
+        ).all()
+
+        # Fallback to data_mgr JSON when empty
+        if not products:
+            try:
+                items = data_mgr.get_paginated_products(page=1, items_per_page=1000).get('items', [])
+                products = [type('P', (), { 'category': it.get('category') }) for it in items]
+            except Exception:
+                products = []
+        category_counter = Counter()
+
+        for p in products:
+            category = getattr(p, 'category', None)
+            if category and is_skincare_category(category):
+                category_counter[category] += 1
+
+        return dict(category_counter)
 
 def get_avg_price_by_category() -> Dict[str, float]:
-    from sqlalchemy import func
+
     with SessionLocal() as session:
-        results = session.query(
-            SociollaReferensi.category,
-            func.avg((SociollaReferensi.min_price + SociollaReferensi.max_price) / 2)
-        ).filter(
-            SociollaReferensi.category != None,
-            SociollaReferensi.min_price != None,
-            SociollaReferensi.max_price != None
-        ).group_by(SociollaReferensi.category).all()
-        return {cat: float(avg_price) for cat, avg_price in results if avg_price is not None}
+
+        products = session.query(
+            SociollaReferensi
+        ).all()
+
+        # Fallback to JSON via data_mgr if DB empty
+        if not products:
+            try:
+                items = data_mgr.get_paginated_products(page=1, items_per_page=1000).get('items', [])
+                products = [type('P', (), { 'category': it.get('category'), 'min_price': it.get('min_price') or it.get('min_price', 0), 'max_price': it.get('max_price') or it.get('min_price', 0) }) for it in items]
+            except Exception:
+                products = []
+        category_prices = {}
+
+        for p in products:
+            category = getattr(p, 'category', None)
+            if (
+                category and
+                is_skincare_category(category) and
+                getattr(p, 'min_price', None) and
+                getattr(p, 'max_price', None)
+            ):
+
+                avg_price = (
+                    p.min_price +
+                    p.max_price
+                ) / 2
+
+                if category not in category_prices:
+                    category_prices[category] = []
+
+                category_prices[category].append(
+                    avg_price
+                )
+
+        final_avg = {}
+
+        for cat, prices in category_prices.items():
+            final_avg[cat] = sum(prices) / len(prices)
+
+        return final_avg
+
 
 def get_personal_stats() -> Dict[str, Any]:
-    """Ambil statistik personal user yang sedang login."""
+
     try:
-        username = nicegui_app.storage.user.get('username', '')
-        wishlist = state.wishlist or []
-        routine  = state.routine  or []
 
-        cats = [
-            p.get('category', '')
-            for p in wishlist
-            if p.get('category')
-        ]
-
-        makeup_categories = [
-            'Lip Product',
-            'Powder',
-            'Blush',
-            'Cushion',
-            'Eye Product'
-        ]
-
-        skincare_categories = [
-            'Serum',
-            'Moisturizer',
-            'Sunscreen',
-            'Cleanser',
-            'Toner',
-            'Mask'
-        ]
-
-        makeup_count = sum(
-            1 for c in cats
-            if c in makeup_categories
+        username = nicegui_app.storage.user.get(
+            'username',
+            ''
         )
 
-        skincare_count = sum(
-            1 for c in cats
-            if c in skincare_categories
-        )
+        wishlist = state.wishlist if state.wishlist else []
+        routine = state.routine if state.routine else []
 
-        if makeup_count > skincare_count:
-            fav_category = 'Makeup'
+        categories = []
 
-        elif skincare_count > makeup_count:
-            fav_category = 'Skincare'
+        for p in wishlist:
 
-        elif makeup_count == 0 and skincare_count == 0:
-            fav_category = '-'
+            cat = p.get('category')
+
+            if cat:
+                categories.append(cat)
+
+        if categories:
+            fav_category = Counter(categories).most_common(1)[0][0]
 
         else:
-            fav_category = 'Mix Makeup & Skincare'
+            fav_category = '-'
 
-        # FAVORITE INGREDIENT
         ingredients = []
 
         for p in wishlist:
+
             ing = p.get('ingredients', '')
 
             if ing:
+
                 ingredients.extend([
                     x.strip()
                     for x in ing.split(',')
@@ -210,6 +344,7 @@ def get_personal_stats() -> Dict[str, Any]:
         }
 
     except Exception as e:
+
         print(f'Error personal stats: {e}')
 
         return {
@@ -220,390 +355,349 @@ def get_personal_stats() -> Dict[str, Any]:
             'fav_ingredient': '-',
         }
 
-        
 
-def plot_to_base64(fig) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=130, bbox_inches='tight',
-                facecolor='white', edgecolor='none')
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode()
-    plt.close(fig)
-    return f"data:image/png;base64,{img_base64}"
-
-
-# ── Komponen chart ────────────────────────────────────────────────
+# ── IMAGE ──────────────────────────────────────────
+# ── CHARTS ─────────────────────────────────────────
 @lru_cache(maxsize=1)
 def chart_rating_distribution():
+    """Return ECharts option dict for rating distribution (donut)."""
     rating_dist = get_rating_distribution()
-    labels = [k for k, v in rating_dist.items() if v > 0]
-    sizes  = [v for v in rating_dist.values() if v > 0]
-    
-    if not sizes:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        fig.patch.set_facecolor('white')
-        ax.text(0.5, 0.5, 'Belum ada data rating.', ha='center', va='center', fontsize=10, color='gray')
-        ax.set_title('Distribusi Rating', fontsize=13, fontweight='bold', color='#1F2937', pad=10, loc='left')
-        ax.axis('off')
-        plt.tight_layout(pad=1.5)
-        return plot_to_base64(fig)
+    data = [ { 'name': k, 'value': v } for k, v in rating_dist.items() if v > 0 ]
 
-    colors = [PINK_PRIMARY, '#F97316', '#EAB308', '#22C55E', '#06B6D4'][:len(labels)]
-    star_labels = ['5 bintang', '4 bintang', '3 bintang', '2 bintang', '1 bintang'][:len(labels)]
+    if not data:
+        return {
+            'title': { 'text': 'Belum ada data rating.', 'left': 'center', 'top': '40%', 'textStyle': { 'color': '#6B7280' } }
+        }
 
-    fig, ax = plt.subplots(figsize=(6, 5))
-    fig.patch.set_facecolor('white')
-
-    wedges, _, autotexts = ax.pie(
-        sizes,
-        labels=None,
-        colors=colors,
-        autopct='%1.1f%%',
-        startangle=90,
-        pctdistance=0.72,
-        wedgeprops=dict(width=0.55, edgecolor='white', linewidth=2.5),
-    )
-    for at in autotexts:
-        at.set_fontsize(9)
-        at.set_fontweight('bold')
-        at.set_color('white')
-
-    legend_labels = [f'{s}  {l} ({v})' for s, l, v in zip(star_labels, labels, sizes)]
-    patches = [mpatches.Patch(color=c, label=lbl) for c, lbl in zip(colors, legend_labels)]
-    ax.legend(handles=patches, loc='lower center', bbox_to_anchor=(0.5, -0.18),
-              ncol=1, fontsize=8, frameon=False, labelcolor='#374151')
-
-    ax.set_title('Distribusi Rating', fontsize=13, fontweight='bold',
-                 color='#1F2937', pad=10, loc='left')
-
-    plt.tight_layout(pad=1.5)
-    return plot_to_base64(fig)
+    option = {
+        'tooltip': { 'trigger': 'item', 'formatter': '{b}: {c} ({d}%)' },
+        'legend': { 'orient': 'horizontal', 'bottom': 0, 'data': [d['name'] for d in data], 'textStyle': { 'fontSize': 12 } },
+        'color': PALETTE,
+        'series': [ {
+            'name': 'Rentang Rating',
+            'type': 'pie',
+            'radius': ['45%', '70%'],
+            'avoidLabelOverlap': False,
+            'label': { 'show': True, 'position': 'center', 'formatter': '{d}%\n{b}', 'fontSize': 14, 'fontWeight': 'bold' },
+            'labelLine': { 'show': False },
+            'data': data
+        } ]
+    }
+    return option
 
 
 @lru_cache(maxsize=1)
 def chart_top_brands():
+    """Return ECharts option dict for top brands bar chart."""
     brands = get_top_brands()
-    brand_names  = list(brands.keys())
-    brand_counts = list(brands.values())
+    pairs = sorted(brands.items(), key=lambda x: x[1], reverse=True)
+    names = [p[0] for p in pairs]
+    counts = [p[1] for p in pairs]
 
-    if not brand_counts:
-        fig, ax = plt.subplots(figsize=(7, 5))
-        fig.patch.set_facecolor('white')
-        setup_ax(ax, 'Top Brands', show_grid_y=True)
-        ax.text(0.5, 0.5, 'Belum ada data brand.', ha='center', va='center', fontsize=10, color='gray')
-        plt.tight_layout(pad=1.5)
-        return plot_to_base64(fig)
+    if not counts:
+        return { 'title': { 'text': 'Belum ada data brand.', 'left': 'center', 'top': '40%', 'textStyle': { 'color': '#6B7280' } } }
 
-    max_c = max(brand_counts)
-    colors = [PINK_PRIMARY if c == max_c else PINK_LIGHT for c in brand_counts]
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    fig.patch.set_facecolor('white')
-
-    bars = ax.bar(brand_names, brand_counts, color=colors, width=0.55,
-                  zorder=2, linewidth=0)
-    setup_ax(ax, 'Top Brands', show_grid_y=True)
-    ax.set_ylabel('Jumlah Produk', fontsize=9, color='#6B7280', labelpad=6)
-    ax.set_ylim(0, max_c * 1.25)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
-    plt.xticks(rotation=35, ha='right', fontsize=8.5)
-
-    for bar in bars:
-        h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, h + 0.05,
-                str(int(h)), ha='center', va='bottom',
-                fontsize=9, fontweight='bold', color='#9D174D')
-
-    plt.tight_layout(pad=1.5)
-    return plot_to_base64(fig)
+    option = {
+        'tooltip': { 'trigger': 'axis', 'axisPointer': { 'type': 'shadow' } },
+        'grid': { 'left': 20, 'right': 20, 'top': 20, 'bottom': 80 },
+        'xAxis': { 'type': 'category', 'data': names, 'axisLabel': { 'rotate': 30, 'interval': 0, 'fontSize': 11 } },
+        'yAxis': { 'type': 'value' },
+        'color': [ ACCENT_INDIGO ],
+        'series': [ {
+            'data': counts,
+            'type': 'bar',
+            'barWidth': '50%',
+            'label': { 'show': True, 'position': 'top', 'fontWeight': '700' }
+        } ]
+    }
+    return option
 
 
 @lru_cache(maxsize=1)
 def chart_category_distribution():
+    """Return ECharts option dict for category distribution (horizontal bar)."""
     categories = get_category_distribution()
-    cat_names  = list(categories.keys())
-    cat_counts = list(categories.values())
+    pairs = sorted(categories.items(), key=lambda x: x[1], reverse=True)
+    names = [p[0] for p in pairs]
+    counts = [p[1] for p in pairs]
 
-    if not cat_counts:
-        fig, ax = plt.subplots(figsize=(6, 5))
-        fig.patch.set_facecolor('white')
-        ax.text(0.5, 0.5, 'Belum ada data kategori.', ha='center', va='center', fontsize=10, color='gray')
-        ax.set_title('Distribusi Kategori', fontsize=13, fontweight='bold', color='#1F2937', pad=10, loc='left')
-        ax.axis('off')
-        plt.tight_layout(pad=1.5)
-        return plot_to_base64(fig)
+    if not counts:
+        return { 'title': { 'text': 'Belum ada data kategori.', 'left': 'center', 'top': '40%', 'textStyle': { 'color': '#6B7280' } } }
 
-    palette = [PINK_PRIMARY, '#F97316', '#EAB308', '#22C55E', '#06B6D4',
-               '#8B5CF6', '#EC4899', '#14B8A6']
-    colors = palette[:len(cat_names)]
+    total = sum(counts) or 1
+    # Prepare labels showing value and percent
+    data = []
+    for name, val in zip(names, counts):
+        pct = int(round(val / total * 100))
+        data.append({ 'value': val, 'name': name, 'label': { 'show': True, 'position': 'right', 'formatter': f"{val} ({pct}%)" } })
 
-    fig, ax = plt.subplots(figsize=(6, 5))
-    fig.patch.set_facecolor('white')
-
-    wedges, _, autotexts = ax.pie(
-        cat_counts,
-        labels=None,
-        colors=colors,
-        autopct='%1.1f%%',
-        startangle=90,
-        pctdistance=0.72,
-        wedgeprops=dict(width=0.55, edgecolor='white', linewidth=2.5),
-    )
-    for at in autotexts:
-        at.set_fontsize(9)
-        at.set_fontweight('bold')
-        at.set_color('white')
-
-    patches = [mpatches.Patch(color=c, label=f'{n} ({v})')
-               for c, n, v in zip(colors, cat_names, cat_counts)]
-    ax.legend(handles=patches, loc='lower center', bbox_to_anchor=(0.5, -0.22),
-              ncol=2, fontsize=8, frameon=False, labelcolor='#374151')
-
-    ax.set_title('Distribusi Kategori', fontsize=13, fontweight='bold',
-                 color='#1F2937', pad=10, loc='left')
-
-    plt.tight_layout(pad=1.5)
-    return plot_to_base64(fig)
+    option = {
+        'tooltip': { 'trigger': 'axis', 'axisPointer': { 'type': 'shadow' } },
+        'grid': { 'left': 20, 'right': 20, 'top': 20, 'bottom': 40 },
+        'xAxis': { 'type': 'value' },
+        'yAxis': { 'type': 'category', 'data': names, 'inverse': True, 'axisLabel': { 'fontSize': 12 } },
+        'color': [ '#FB923C' ],
+        'series': [ {
+            'type': 'bar',
+            'data': data,
+            'barWidth': '35%',
+            'label': { 'show': True, 'position': 'right', 'fontSize': 10 }
+        } ]
+    }
+    return option
 
 
 @lru_cache(maxsize=1)
 def chart_avg_price():
-    avg_prices    = get_avg_price_by_category()
-    sorted_prices = dict(sorted(avg_prices.items(), key=lambda x: x[1], reverse=True))
-    cat_names     = list(sorted_prices.keys())
-    prices        = list(sorted_prices.values())
+    """Return ECharts option dict for average price per category."""
+    prices = get_avg_price_by_category()
+    pairs = sorted(prices.items(), key=lambda x: x[1], reverse=True)
+    names = [p[0] for p in pairs]
+    vals = [p[1] for p in pairs]
 
-    if not prices:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        fig.patch.set_facecolor('white')
-        setup_ax(ax, 'Rata-rata Harga per Kategori', show_grid_y=True)
-        ax.text(0.5, 0.5, 'Belum ada data harga.', ha='center', va='center', fontsize=10, color='gray')
-        plt.tight_layout(pad=1.5)
-        return plot_to_base64(fig)
+    if not vals:
+        return { 'title': { 'text': 'Belum ada data harga.', 'left': 'center', 'top': '40%', 'textStyle': { 'color': '#6B7280' } } }
 
-    max_p  = max(prices)
-    alphas = [0.45 + 0.55 * (p / max_p) for p in prices]
-    r, g, b = 0xEC / 255, 0x48 / 255, 0x99 / 255
-    colors = [(r, g, b, a) for a in alphas]
+    # format labels as Rupiah
+    def fmt(v):
+        try:
+            return f"Rp{int(round(v)):,}".replace(',', '.')
+        except Exception:
+            return str(int(v))
 
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor('white')
-
-    bars = ax.bar(cat_names, prices, color=colors, width=0.55, zorder=2, linewidth=0)
-    setup_ax(ax, 'Rata-rata Harga per Kategori', show_grid_y=True)
-    ax.set_ylabel('Harga (Rp)', fontsize=9, color='#6B7280', labelpad=6)
-    ax.set_ylim(0, max_p * 1.2)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'Rp {int(x):,}'))
-    plt.xticks(rotation=35, ha='right', fontsize=8.5)
-
-    for bar, price in zip(bars, prices):
-        h = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2, h + max_p * 0.015,
-                f'Rp {int(price):,}', ha='center', va='bottom',
-                fontsize=8, fontweight='bold', color='#9D174D', rotation=0)
-
-    plt.tight_layout(pad=1.5)
-    return plot_to_base64(fig)
+    option = {
+        'tooltip': { 'trigger': 'axis', 'axisPointer': { 'type': 'shadow' } },
+        'grid': { 'left': 20, 'right': 20, 'top': 20, 'bottom': 70 },
+        'xAxis': { 'type': 'category', 'data': names, 'axisLabel': { 'rotate': 20, 'interval': 0, 'fontSize': 11 } },
+        'yAxis': { 'type': 'value' },
+        'color': [ ACCENT_TEAL ],
+        'series': [ {
+            'type': 'bar',
+            'data': [ { 'value': v, 'label': { 'show': True, 'position': 'top', 'fontSize': 10, 'formatter': fmt(v) } } for v in vals ],
+            'barWidth': '45%'
+        } ]
+    }
+    return option
 
 
-# ── Komponen UI ───────────────────────────────────────────────────
-
-def _badge_color(rank: int) -> tuple:
-    """Kembalikan (bg_color, text_color) untuk badge ranking."""
-    if rank == 1:   return ('#FDE68A', '#92400E')
-    elif rank == 2: return ('#E5E7EB', '#374151')
-    elif rank == 3: return ('#FBCFE8', '#9D174D')
-    else:           return ('#F3F4F6', '#6B7280')
-
-
+# ── TRENDING ───────────────────────────────────────
 def build_trending_list(products: List[Dict[str, Any]]):
-    """
-    Render daftar Top 10 Trending sebagai card list dengan gambar produk.
-    Gambar diambil dari field image_url di tabel SociollaReferensi (Sociolla CDN).
-    """
+
     for rank, p in enumerate(products, start=1):
-        bg, fg = _badge_color(rank)
-        with ui.row().classes('w-full items-center gap-3 py-2').style(
-            'border-bottom: 1px solid #FCE7F3;'
+
+        with ui.row().classes(
+            'w-full items-center justify-between py-4'
+        ).style(
+            'border-bottom:1px solid #FCE7F3;'
         ):
-            # Badge ranking
-            ui.label(str(rank)).style(
-                f'min-width:28px; height:28px; border-radius:50%; '
-                f'background:{bg}; color:{fg}; '
-                f'display:flex; align-items:center; justify-content:center; '
-                f'font-weight:700; font-size:12px; flex-shrink:0;'
-            )
 
-            # Gambar produk dari Sociolla (image_url)
-            img_src = (
-                p['image_url']
-                if p['image_url']
-                else 'https://placehold.co/48x48/FCE7F3/9D174D?text=SK'
-            )
-            ui.image(img_src).style(
-                'width:52px; height:52px; border-radius:8px; '
-                'object-fit:cover; flex-shrink:0; border:1px solid #FCE7F3;'
-            )
+            with ui.row().classes(
+                'items-center gap-4'
+            ):
 
-            # Info produk
-            with ui.column().classes('flex-1 gap-0').style('min-width:0;'):
-                ui.label(p['name']).classes('text-sm font-semibold text-gray-800').style(
-                    'white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:320px;'
-                )
-                ui.label(f"{p['brand']}  ·  {p['category']}").classes('text-xs text-gray-400')
-
-            # Rating & wishlist count
-            with ui.column().classes('items-end gap-0').style('flex-shrink:0;'):
-                ui.label(f'★ {p["rating"]:.1f}').classes('text-xs font-bold text-yellow-500')
-                ui.label(f'♥ {p["wishlist"]:,}').classes('text-xs text-pink-400')
-
-
-def build_personal_section(stats: Dict[str, Any]):
-    """
-    Render kartu insight personal user di bagian bawah halaman.
-    Diletakkan di bawah karena sifatnya pelengkap personal,
-    bukan informasi utama yang dibutuhkan semua pengguna.
-    """
-    with ui.card().classes('w-full p-5 shadow-sm rounded-2xl border border-pink-100'):
-        with ui.row().classes('items-center gap-3 mb-4'):
-            ui.label('✨').classes('text-2xl')
-            with ui.column().classes('gap-0'):
-                ui.label(f'Halo, {stats["username"]}!').classes(
-                    'text-base font-semibold text-gray-800'
-                )
-                ui.label('Ini insight skincare personalmu').classes('text-xs text-gray-400')
-
-        with ui.row().classes('w-full gap-3'):
-            tiles = [
-                ('Produk Wishlist',    str(stats['wishlist_count']), '🛍️'),
-                ('Produk di Routine',  str(stats['routine_count']),  '📋'),
-                ('Kategori Favorit',   stats['fav_category'],        '🧴'),
-                ('Ingredient Favorit', stats['fav_ingredient'],      '🔬'),
-            ]
-            for label, value, icon in tiles:
-                with ui.card().classes('flex-1 p-3 rounded-xl').style(
-                    'background:#FDF2F8; border:1px solid #FCE7F3;'
+                with ui.element('div').style(
+                    '''
+                    width:42px;
+                    height:42px;
+                    border-radius:9999px;
+                    background:#E9F99D;
+                    border:2px solid #D9F99D;
+                    display:flex;
+                    align-items:center;
+                    justify-content:center;
+                    font-weight:700;
+                    color:#EC4899;
+                    font-size:20px;
+                    '''
                 ):
-                    ui.label(icon).classes('text-lg mb-1')
-                    ui.label(value).classes('text-base font-bold text-pink-600')
-                    ui.label(label).classes('text-xs text-gray-400 mt-0.5')
+                    ui.label(str(rank))
 
 
-# ── Page utama ────────────────────────────────────────────────────
+                # Provide a small SVG fallback when image_url missing
+                img_src = p.get('image_url') or ''
+                if not img_src:
+                    # simple SVG placeholder with brand initial
+                    initial = (p.get('brand') or 'X')[0:1].upper()
+                    svg = (
+                        f'<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">'
+                        '<rect width="100%" height="100%" fill="#FFF1F7"/>'
+                        f'<text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" '
+                        f'fill="#EC4899" font-size="28" font-weight="700">{initial}</text>'
+                        '</svg>'
+                    )
+                    img_src = f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}"
+
+                ui.image(img_src).style(
+                    '''
+                    width:64px;
+                    height:64px;
+                    border-radius:8px;
+                    object-fit:cover;
+                    border:1px solid #F3F4F6;
+                    '''
+                )
+
+                with ui.column().classes('gap-0'):
+
+                    ui.label(
+                        (p['brand'] or 'MEREK PRODUK').upper()
+                    ).style(
+                        '''
+                        font-size:10px;
+                        font-weight:700;
+                        color:#FF69B4;
+                        '''
+                    )
+
+                    ui.label(
+                        p['name'] or 'NAMA PRODUK'
+                    ).style(
+                        '''
+                        font-size:13px;
+                        font-weight:800;
+                        color:black;
+                        '''
+                    )
+
+            with ui.row().classes(
+                'items-center gap-1'
+            ):
+
+                ui.label('⭐')
+
+                ui.label(
+                    f'{p["rating"]:.1f}/5'
+                ).style(
+                    '''
+                    font-size:18px;
+                    font-weight:800;
+                    color:black;
+                    '''
+                )
+
+
+# ── PERSONAL ───────────────────────────────────────
+def build_personal_section(stats: Dict[str, Any]):
+
+    with ui.card().classes('w-full p-6 rounded-3xl') .style(f'background:{CARD_BG_NEUTRAL}; {CARD_SHADOW};'):
+
+        ui.label(f'Halo, {stats["username"]}!').classes('text-2xl font-bold text-gray-900 mb-1').style('font-size:20px;')
+
+        ui.label('Ini insight skincare personal mu').classes('text-gray-500 mb-5').style('font-size:13px;')
+
+        with ui.row().classes(
+            'w-full gap-4'
+        ):
+
+            tiles = [
+                ('Produk Wishlist', str(stats['wishlist_count']), 'favorite'),
+                ('Produk di Routine', str(stats['routine_count']), 'calendar_month'),
+                ('Kategori Favorit', stats['fav_category'], 'star'),
+                ('Bahan Favorit', stats['fav_ingredient'], 'spa'),
+            ]
+
+            for label, value, icon in tiles:
+
+                with ui.card().classes('flex-1 rounded-2xl p-5') .style(f'background:{CARD_BG_NEUTRAL}; border:1px solid rgba(15,23,42,0.04);'):
+
+                    ui.icon(icon).style(f'color:{ACCENT_INDIGO}; font-size:20px; margin-bottom:10px;')
+
+                    ui.label(value).style('color:#111827; font-size:28px; font-weight:800; line-height:1;')
+
+                    ui.label(label).style('color:#6B7280; font-size:13px; font-weight:700; margin-top:10px;')
+
+
+# ── PAGE ───────────────────────────────────────────
 def show_page():
-    """MISI NAJLA: Membuat Visualisasi Statistik dengan Matplotlib"""
 
-    # --- JANGAN DIUBAH (Wajib untuk Navigasi) ---
+    chart_rating_distribution.cache_clear()
+    chart_top_brands.cache_clear()
+    chart_category_distribution.cache_clear()
+    chart_avg_price.cache_clear()
+
     auth_redirect = AuthManager.require_auth()
-    if auth_redirect: return auth_redirect
+
+    if auth_redirect:
+        return auth_redirect
+
     UIComponents.navbar()
     UIComponents.sidebar()
-    # -------------------------------------------
 
-    # ── Header ───────────────────────────────────────────────────
-    with ui.row().classes('items-center gap-3 mt-4 mb-6'):
+    with ui.row().classes(
+        'items-center gap-3 mt-4 mb-6'
+    ):
+
         ui.label('✨').classes('text-3xl')
+
         with ui.column().classes('gap-0'):
-            ui.label('Beauty Insights').classes('text-2xl font-bold text-gray-800')
-            ui.label('Insight & analitik data produk Sociolla').classes('text-sm text-gray-400')
 
-        ui.space()
-
-        def refresh_stats():
-            chart_rating_distribution.cache_clear()
-            chart_top_brands.cache_clear()
-            chart_category_distribution.cache_clear()
-            chart_avg_price.cache_clear()
-            ui.notify('Data statistik diperbarui!', color='positive')
-            ui.navigate.to('/stats')
-
-        ui.button('Refresh Data', icon='refresh', on_click=refresh_stats).props('outline').classes(
-            'rounded-xl text-pink-500 border-pink-200'
-        )
-
-    # ── ROW 1: Top 10 Trending (full width) ───────────────────────
-    with ui.card().classes('w-full p-5 shadow-sm rounded-2xl border border-pink-100 mb-4') as trend_card:
-        ui.label('🔥 Trending Minggu Ini (Top 10)').classes('font-semibold text-gray-700 mb-3')
-        with ui.row().classes('w-full justify-center py-4'):
-            trend_spinner = ui.spinner('dots', size='lg', color='pink')
-
-    # ── ROW 2: Distribusi Rating + Top Brands ─────────────────────
-    with ui.row().classes('w-full gap-4 mb-4'):
-        with ui.card().classes('flex-1 p-5 shadow-sm rounded-2xl border border-pink-100') as rating_card:
-            ui.label('⭐ Distribusi Rating').classes('font-semibold text-gray-700 mb-3')
-            with ui.row().classes('w-full justify-center py-4'):
-                rating_spinner = ui.spinner('dots', size='lg', color='pink')
-
-        with ui.card().classes('flex-1 p-5 shadow-sm rounded-2xl border border-pink-100') as brand_card:
-            ui.label('🏷️ Top Brands').classes('font-semibold text-gray-700 mb-3')
-            with ui.row().classes('w-full justify-center py-4'):
-                brand_spinner = ui.spinner('dots', size='lg', color='pink')
-
-    # ── ROW 3: Kategori Produk + Rata-rata Harga ──────────────────
-    with ui.row().classes('w-full gap-4 mb-4'):
-        with ui.card().classes('flex-1 p-5 shadow-sm rounded-2xl border border-pink-100') as cat_card:
-            ui.label('🧴 Kategori Produk').classes('font-semibold text-gray-700 mb-3')
-            with ui.row().classes('w-full justify-center py-4'):
-                cat_spinner = ui.spinner('dots', size='lg', color='pink')
-
-        with ui.card().classes('flex-1 p-5 shadow-sm rounded-2xl border border-pink-100') as price_card:
-            ui.label('💰 Rata-rata Harga per Kategori').classes('font-semibold text-gray-700 mb-3')
-            with ui.row().classes('w-full justify-center py-4'):
-                price_spinner = ui.spinner('dots', size='lg', color='pink')
-
-    # ── BAGIAN BAWAH: Insight Personal ───────────────────────────
-    with ui.row().classes('items-center gap-2 mt-4 mb-2'):
-        ui.label('Insight Personal Kamu').classes('text-base font-semibold text-gray-700')
-        ui.label('(dari wishlist & routine-mu)').classes('text-xs text-gray-400')
-
-    personal_container = ui.column().classes('w-full gap-0')
-    with personal_container:
-        with ui.row().classes('w-full justify-center py-4'):
-            personal_spinner = ui.spinner('dots', size='lg', color='pink')
-
-    async def fetch_and_render_stats():
-        import asyncio
+            ui.label('Beauty Insights').classes('text-3xl font-extrabold text-gray-800').style(f'font-size:28px; line-height:1; background:{HEADER_GRADIENT}; -webkit-background-clip:text; color:transparent;')
+            ui.label('Insight & analitik data produk Sociolla').classes('text-sm text-gray-500').style('font-size:14px;')
         
-        try:
-            # 1. Trending
-            trending = await asyncio.to_thread(get_trending_products)
-            trend_spinner.parent_slot.parent.clear() # Clear container spinner
-            with trend_card:
-                if trending:
-                    build_trending_list(trending)
-                else:
-                    ui.label('Belum ada data produk.').classes('text-sm text-gray-400 italic')
-            
-            # 2. Rating
-            rating_img = await asyncio.to_thread(chart_rating_distribution)
-            rating_spinner.parent_slot.parent.clear()
-            with rating_card:
-                ui.image(rating_img).classes('w-full rounded-lg')
-                
-            # 3. Brands
-            brands_img = await asyncio.to_thread(chart_top_brands)
-            brand_spinner.parent_slot.parent.clear()
-            with brand_card:
-                ui.image(brands_img).classes('w-full rounded-lg')
-                
-            # 4. Categories
-            cat_img = await asyncio.to_thread(chart_category_distribution)
-            cat_spinner.parent_slot.parent.clear()
-            with cat_card:
-                ui.image(cat_img).classes('w-full rounded-lg')
-                
-            # 5. Price
-            price_img = await asyncio.to_thread(chart_avg_price)
-            price_spinner.parent_slot.parent.clear()
-            with price_card:
-                ui.image(price_img).classes('w-full rounded-lg')
-                
-            # 6. Personal Stats
-            p_stats = await asyncio.to_thread(get_personal_stats)
-            personal_spinner.parent_slot.parent.clear()
-            with personal_container:
-                build_personal_section(p_stats)
-        except Exception as e:
-            print(f"Error rendering stats: {e}")
+        with ui.button(
+            'Refresh Data',
+            icon='refresh',
+            on_click=lambda: ui.navigate.reload()
+        ).props(
+            'outline'
+        ).classes(
+            'ml-auto'
+        ).style(
+            '''
+            color:#60A5FA;
+            border:1px solid #93C5FD;
+            border-radius:12px;
+            font-weight:700;
+            '''
+        ):
+            pass
 
-    ui.timer(0.01, fetch_and_render_stats, once=True)
+    # TOP 10
+
+    with ui.card().classes(
+        'w-full p-5 rounded-3xl mb-5'
+    ).style(
+        f'background:{CARD_BG_NEUTRAL}; {CARD_SHADOW} padding:20px;'
+    ):
+
+        ui.label('Trending (Top 10)').classes('font-bold mb-4').style('font-size:13px; text-transform:uppercase; letter-spacing:1px; color:'+ACCENT_INDIGO+';')
+
+        trending = get_trending_products()
+
+        if trending:
+            build_trending_list(trending)
+
+        else:
+            ui.label('Belum ada data produk.')
+
+    # CHARTS
+    with ui.row().classes('w-full gap-4 mb-4'):
+        with ui.card().classes('flex-1 p-4 rounded-2xl') .style(f'background:{CARD_BG_NEUTRAL}; {CARD_SHADOW};'):
+            ui.label('Distribusi Rating').style('font-size:19px; text-transform:uppercase; letter-spacing:1px; color:'+ACCENT_INDIGO+'; font-weight:700; margin-bottom:8px;')
+            ui.echart(chart_rating_distribution()).classes('w-full rounded-lg')
+            ui.label('Chart menunjukkan persentase produk berdasarkan rentang rating dari sumber Sociolla.').classes('text-sm text-gray-500 mt-2').style('font-size:13px;')
+
+        with ui.card().classes('flex-1 p-5 rounded-2xl') .style(f'background:{CARD_BG_NEUTRAL}; {CARD_SHADOW};'):
+            ui.label('Top Brands').style('font-size:19px; text-transform:uppercase; letter-spacing:1px; color:'+ACCENT_INDIGO+'; font-weight:700; margin-bottom:8px;')
+            ui.echart(chart_top_brands()).classes('w-full rounded-lg')
+            ui.label('Top brands: jumlah produk per merek (urut dari paling banyak).').classes('text-sm text-gray-500 mt-2').style('font-size:13px;')
+
+    with ui.row().classes('w-full gap-4 mb-5'):
+        with ui.card().classes('flex-1 p-5 rounded-2xl') .style(f'background:{CARD_BG_NEUTRAL}; {CARD_SHADOW};'):
+            ui.label('Distribusi Kategori').style('font-size:19px; text-transform:uppercase; letter-spacing:1px; color:'+ACCENT_INDIGO+'; font-weight:700; margin-bottom:8px;')
+            ui.echart(chart_category_distribution()).classes('w-full rounded-lg')
+            ui.label('Distribusi kategori: proporsi produk per kategori. Angka di samping adalah jumlah produk dan persentase.').classes('text-sm text-gray-500 mt-2').style('font-size:13px;')
+
+        with ui.card().classes('flex-1 p-5 rounded-2xl') .style(f'background:{CARD_BG_NEUTRAL}; {CARD_SHADOW};'):
+            ui.label('Rata-rata Harga per Kategori').style('font-size:19px; text-transform:uppercase; letter-spacing:1px; color:'+ACCENT_INDIGO+'; font-weight:700; margin-bottom:8px;')
+            ui.echart(chart_avg_price()).classes('w-full rounded-lg')
+            ui.label('Rata-rata harga per kategori (dalam Rupiah). Nilai di atas bar menunjukkan estimasi rata-rata.').classes('text-sm text-gray-500 mt-2').style('font-size:13px;')
+
+    # PERSONAL
+    with ui.row().classes('items-center gap-2 mt-4 mb-3'):
+        ui.label('Insight Personal').classes('text-3xl font-extrabold text-gray-800').style(f'font-size:28px; line-height:1; background:{HEADER_GRADIENT}; -webkit-background-clip:text; color:transparent;')
+        ui.label('(dari wishlist & routine-mu)').classes('text-sm text-gray-500').style('font-size:13px;')
+
+    build_personal_section(
+        get_personal_stats()
+    )
