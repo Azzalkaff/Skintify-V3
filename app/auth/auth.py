@@ -200,9 +200,11 @@ async def auth_google_callback_route(request: Request):
         email = user_info.get('email')
         username = user_info.get('name', email.split('@')[0])
         
-        # Cek apakah user ada di DB, jika tidak buat baru (password Null)
+        # Cek apakah user ada di DB, jika tidak buat baru (berikan password acak rahasia)
         if not BasisData.cek_identifier_terdaftar(email):
-            BasisData.tambah_pengguna(email, username, None, "user")
+            import secrets
+            dummy_password = f"GOOGLE_SSO_{secrets.token_hex(16)}"
+            BasisData.tambah_pengguna(email, username, dummy_password, "user")
             
         user_data = BasisData.get_pengguna(email)
         
