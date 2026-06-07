@@ -165,3 +165,76 @@ class AuthManager:
         "admin": {"password": "admin123", "role": "admin"},
         "user": {"password": "rahasia", "role": "user"}
     }
+
+# --- OAUTH GOOGLE INTEGRATION ---
+import os
+from authlib.integrations.starlette_client import OAuth
+from fastapi import Request
+from fastapi.responses import RedirectResponse
+
+oauth = OAuth()
+if os.getenv("GOOGLE_CLIENT_ID"):
+    oauth.register(
+        name='google',
+        client_id=os.getenv("GOOGLE_CLIENT_ID"),
+        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+        server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+        client_kwargs={'scope': 'openid email profile'}
+    )
+
+async def login_google_route(request: Request):
+    """FastAPI route handler untuk melempar pengguna ke Google."""
+    if not os.getenv("GOOGLE_CLIENT_ID"):
+        return RedirectResponse('/login?error=Google_Not_Configured')
+    redirect_uri = request.url_for('auth_google_callback')
+    return await oauth.google.authorize_redirect(request, str(redirect_uri))
+
+async def auth_google_callback_route(request: Request):
+    """FastAPI route handler untuk memproses respons dari Google."""
+    try:
+        token = await oauth.google.authorize_access_token(request)
+        user_info = token.get('userinfo')
+        if not user_info:
+            return RedirectResponse('/login?error=GoogleAuthFailed')
+            
+        email = user_info.get('email')
+        username = user_info.get('name', email.split('@')[0])
+        
+        # Cek apakah user ada di DB, jika tidak buat baru (password Null)
+        if not BasisData.cek_identifier_terdaftar(email):
+            BasisData.tambah_pengguna(email, username, None, "user")
+            
+        user_data = BasisData.get_pengguna(email)
+        
+        # Karena kita berada di FastAPI raw route, kita mengakses app.storage.user dari nicegui app
+        # nicegui.app.storage.user is bound to the request via session cookie
+        app.storage.user['authenticated'] = True
+        app.storage.user['email']         = user_data.get('email')
+        app.storage.user['username']      = user_data.get('username')
+        app.storage.user['role']          = user_data.get('role', 'user')
+        app.storage.user['skin_type'] = user_data.get('skin_type')
+        app.storage.user['onboarding_completed'] = bool(user_data.get('onboarding_completed', 0))
+        
+        import json
+        def _parse_json_field(field_name, default=[]):
+            val = user_data.get(field_name)
+            if not val:
+                return default
+            try:
+                return json.loads(val)
+            except Exception:
+                return default
+
+        app.storage.user['wishlist'] = BasisData.ambil_wishlist(email)
+        app.storage.user['avoid_ingredients'] = _parse_json_field('avoid_ingredients')
+        app.storage.user['skin_issues'] = _parse_json_field('skin_issues')
+        app.storage.user['skincare_goals'] = _parse_json_field('skincare_goals')
+        app.storage.user['lifestyle'] = _parse_json_field('lifestyle')
+        
+        if app.storage.user.get('onboarding_completed'):
+            return RedirectResponse('/')
+        else:
+            return RedirectResponse('/onboarding')
+            
+    except Exception as e:
+        return RedirectResponse(f'/login?error={str(e)}')

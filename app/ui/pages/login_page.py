@@ -103,6 +103,11 @@ def show_page():
                     ui.button('Daftar & Kirim OTP', on_click=proses_daftar) \
                         .classes('w-full btn-primary text-white rounded-xl py-3 shadow-lg')
                 
+                # --- GOOGLE OAUTH BUTTON ---
+                ui.separator().classes('my-4')
+                ui.button('Masuk dengan Google', icon='login', on_click=lambda: ui.navigate.to('/login/google')) \
+                    .classes('w-full bg-white text-gray-700 border border-gray-300 rounded-xl py-3 shadow-sm hover:bg-gray-50')
+                
                 # --- DEVELOPER SKIP BUTTONS (2 tombol: User & Admin) ---
                 # with ui.column().classes('w-full mt-6 border-t border-gray-100 pt-4 gap-2'):
                 #     ui.label('Developer Shortcut').classes('text-[10px] text-gray-400 uppercase tracking-widest text-center font-bold')

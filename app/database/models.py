@@ -19,7 +19,9 @@ class User(Base):
     id          = Column(Integer, primary_key=True, autoincrement=True)
     email       = Column(String(255), unique=True, nullable=False)
     username    = Column(String(100), unique=True, nullable=False)
-    password    = Column(String(255), nullable=False)
+    password    = Column(String(255), nullable=True) # Boleh kosong untuk user Google
+    auth_provider = Column(String(20), nullable=False, default='local') # 'local' | 'google'
+    google_id   = Column(String(255), nullable=True)
     role        = Column(String(20), nullable=False, default='user')  # 'admin' | 'user'
     city        = Column(String(100), nullable=True)  # Lokasi untuk API cuaca
     created_at  = Column(DateTime, default=datetime.utcnow)
