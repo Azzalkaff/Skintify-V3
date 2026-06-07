@@ -186,7 +186,7 @@ async def login_google_route(request: Request):
     """FastAPI route handler untuk melempar pengguna ke Google."""
     if not os.getenv("GOOGLE_CLIENT_ID"):
         return RedirectResponse('/login?error=Google_Not_Configured')
-    redirect_uri = request.url_for('auth_google_callback')
+    redirect_uri = request.url_for('auth_google_callback_route')
     return await oauth.google.authorize_redirect(request, str(redirect_uri))
 
 async def auth_google_callback_route(request: Request):
