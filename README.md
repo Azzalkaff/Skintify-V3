@@ -1,14 +1,14 @@
-# Skintify 🌟
+# Skintify
 *Smart Skincare Recommendation & Analysis System*
 
 Skintify adalah aplikasi cerdas berbasis web (menggunakan arsitektur Python *Asynchronous*) yang dirancang untuk membantu pengguna menemukan produk perawatan kulit terbaik. Aplikasi ini mampu mencocokkan bahan yang aman (*Ingredient Match*), memberikan rekomendasi personal, dan menganalisis tren produk terkini.
 
 ## 🚀 Fitur Utama
-1. **Scraping Terintegrasi**: Mengumpulkan data produk secara otomatis dan real-time dari marketplace terkemuka.
-2. **Smart Conflict Engine**: Menganalisis ketidakcocokan antar bahan kimia produk untuk mencegah iritasi kulit.
-3. **Personalized Routine**: Fitur *onboarding* yang menyesuaikan rutinitas perawatan dengan profil wajah pengguna secara dinamis.
-4. **AI Chat Assistant**: Asisten pintar yang dilatih khusus untuk menjadi dermatolog pribadi Anda.
-5. **Executable Ready**: Dilengkapi dengan skrip otomatisator untuk mengemas aplikasi web menjadi file Desktop Windows (.exe).
+1. **Bandingkan Harga Marketplace**: Mengumpulkan data produk secara otomatis dan real-time dari sociolla, lazada, tokopedia, dan shopee (shopee soon).
+2. **AI Chat Assistant**: Asisten pintar yang dilatih khusus untuk menjadi dermatolog pribadi Anda.
+3. **Compare Produk**: Bandingkan beberapa produk di satu halaman penuh
+
+
 
 ## 🛠️ Panduan Instalasi (Cara Menjalankan)
 
