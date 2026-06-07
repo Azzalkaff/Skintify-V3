@@ -116,28 +116,6 @@ def get_tokopedia_price(p):
 def get_lazada_price(p):
     return get_marketplace_price(p, "lazada")
     
-def show_all_ingredients(ingredients):
-    with ui.dialog() as dialog, ui.card():
-        ui.label("Kandungan & Fungsinya").classes("font-bold mb-2")
-
-        for ing in ingredients:
-            label = ing.lower()
-
-            if "niacinamide" in label:
-                desc = "Brightening ☀️"
-            elif "hyaluronic" in label:
-                desc = "Hydrating 💧"
-            elif "centella" in label:
-                desc = "Soothing 🌿"
-            elif "salicylic" in label:
-                desc = "Acne care 🔥"
-            else:
-                desc = ""
-
-            ui.label(f"{ing} {desc}")
-
-    dialog.open()
-
 def get_main_ingredients(p):
     text = str(
         p.get('description_raw')
@@ -171,14 +149,6 @@ def get_main_ingredients(p):
         if key in text:
             found.append(label)
 
-    found = list(dict.fromkeys(found))
-
-    if not found:
-        return '-'
-
-    return ', '.join(found[:3])
-
-    # hapus duplikat
     found = list(dict.fromkeys(found))
 
     if not found:
@@ -267,24 +237,6 @@ def get_best_price(p):
     valid = [x for x in prices if x]
     return min(valid) if valid else 0
 
-def get_cheapest_marketplace(p):
-    prices = {
-        'Sociolla': p.get('min_price'),
-        'Tokopedia': get_tokopedia_price(p),
-        'Lazada': get_lazada_price(p)
-    }
-
-    valid_prices = {
-        k: v for k, v in prices.items()
-        if v and v > 0
-    }
-
-    if not valid_prices:
-        return '-'
-
-    cheapest = min(valid_prices, key=valid_prices.get)
-    return f"{cheapest} ({format_rupiah(valid_prices[cheapest])})"
-
 def get_best_marketplace_url(p):
     prices = {
         'sociolla': (
@@ -314,12 +266,6 @@ def get_best_marketplace_url(p):
     cheapest = min(valid, key=lambda x: valid[x][0])
 
     return valid[cheapest][1]
-
-def format_rupiah(value):
-    try:
-        return f"Rp{int(value):,}".replace(',', '.')
-    except:
-        return '-'
 
 def show_page():
     """NAJLA'S MISSION: Enhanced Comparison Page with Low Cognitive Load & Poka-yoke."""
@@ -740,6 +686,7 @@ def show_page():
                             
                         # WINNER RECOMMENDATION
                         best_v = max(filled_slots, key=lambda x: (x.get('average_rating') or 0) / (x.get('min_price') or 1))
+                        best_url = get_best_marketplace_url(best_v)
                         with ui.card().classes('w-full p-8 bg-gradient-to-r from-pink-500 to-blue-600 text-white border-none rounded-[2.5rem] items-center flex-row gap-8 shadow-2xl mt-4'):
                             ui.icon('emoji_events', size='56px', color='yellow-300').classes('animate-bounce')
                             with ui.column().classes('gap-1'):
@@ -747,12 +694,11 @@ def show_page():
                                 ui.label(f"{best_v['brand']} {best_v['product_name']}").classes('text-xl font-black')
                                 ui.label('Rekomendasi terbaik berdasarkan analisis harga dan kepuasan pengguna.').classes('text-xs font-medium text-pink-100')
                             ui.space()
+                            print(best_url)
+                            print(type(best_url))
                             ui.button(
                                 'Cek Marketplace',
-                                on_click=lambda p=best_v: ui.open(
-                                    get_best_marketplace_url(p),
-                                    new_tab=True
-                                )
+                                on_click=lambda: ui.navigate.to(best_url)
                             ).props('unelevated').style('''
                                 background: white !important;
                                 color: #7265D8 !important;
